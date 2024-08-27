@@ -15,8 +15,8 @@ setuptools.setup(
     ext_modules=[cpp_extension.CUDAExtension(
         'gptq_c',
         [
-            'gptq/gemm.cpp',
-            'gptq/gemm_kernel.cu',
+            'gptq/accumulate_hessian.cpp',
+            'gptq/accumulate_hessian_kernel.cu',
         ],
     )],
     include_dirs=[

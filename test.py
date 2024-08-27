@@ -4,25 +4,24 @@ import torch
 
 device = 'cuda:1'
 
-type_a = torch.float16
-type_b = torch.float16
-type_c = torch.float32
+type_x = torch.float16
+type_h = torch.float32
 
-a = torch.randn(77, 310, 370, dtype=type_a, device=device)
-b = torch.randn(77, 370, 410, dtype=type_b, device=device)
-c = torch.randn(77, 310, 410, dtype=type_c, device=device)
+x = torch.randn(77, 370, dtype=type_x, device=device)
+h = torch.randn(370, 370, dtype=type_h, device=device)
+x_32 = x.to(type_h)
 
-# ref = a @ b + c
+ref = h + x.t() @ x
 # print(ref.dtype)
-# print(ref)
+print(ref)
 
-ref2 = a.to(type_c) @ b.to(type_c) + c
+ref2 = h + x_32.t() @ x_32
 # print(ref2.dtype)
-# print(ref2)
+print(ref2)
 
-gptq.mul(a, b, c)
-# print(c)
+gptq.accumulate_hessian(h, x)
+print(h)
 
-diff = c - ref2
+diff = h - ref2
 print(diff)
 print(diff.abs().max().item())
