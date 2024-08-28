@@ -1,5 +1,5 @@
-#ifndef GEMM_KERNEL_CUH
-#define GEMM_KERNEL_CUH
+#ifndef ACCUMULATE_HESSIAN_KERNEL_CUH
+#define ACCUMULATE_HESSIAN_KERNEL_CUH
 
 
 // https://developer.nvidia.com/blog/cutlass-linear-algebra-cuda/
@@ -16,8 +16,8 @@
 int accumulate_hessian_kernel(
     void* mat_hessian,
     const void* mat_input,
-    const int size_hidden,  // number of rows of A and C matrices
-    const int size_batch  // number of columns of A and rows of B matrices
+    const int size_hidden,
+    const int size_batch
 ) {
     // Define the GEMM type
     using Gemm = cutlass::gemm::device::Gemm<
@@ -34,11 +34,11 @@ int accumulate_hessian_kernel(
 
     // Define GEMM arguments
     typename Gemm::Arguments args(
-        {size_hidden, size_hidden, size_batch},  // Problem size
-        {(cutlass::half_t*) mat_input, size_hidden},  // Tensor A (with leading dimension)
-        {(cutlass::half_t*) mat_input, size_hidden},  // Tensor B (with leading dimension)
-        {(float*) mat_hessian, size_hidden},  // Tensor C (output with leading dimension)
-        {(float*) mat_hessian, size_hidden},  // Tensor D (same as C)
+        {size_hidden, size_hidden, size_batch},  // problem size
+        {(cutlass::half_t*) mat_input, size_hidden},  // tensor A (with leading dimension)
+        {(cutlass::half_t*) mat_input, size_hidden},  // tensor B (with leading dimension)
+        {(float*) mat_hessian, size_hidden},  // tensor C (output with leading dimension)
+        {(float*) mat_hessian, size_hidden},  // tensor D (same as C)
         {1.f, 1.f}  // scalars for alpha and beta
     );
 
