@@ -1,224 +1,220 @@
+import logging
 import time
 
 import torch
-import torch.nn as nn
+from torch import nn
+from tqdm import tqdm
+from transformers import LlamaForCausalLM
 
-from gptq import *
-from modelutils import *
-from quant import *
 
 from data_utils import get_dataloader
+from layer_wrappers import Catcher, find_submodules_by_types, extract_dependencies, find_and_replace_submodule_by_name, \
+    move_to_device, RecorderWrapper
+from quant_2 import reconstruct_nn_linear
+from gptq_2 import HessianHook, gptq_quant
 
 
-def get_llama(model):
-    import torch
-    def skip(*args, **kwargs):
-        pass
-    torch.nn.init.kaiming_uniform_ = skip
-    torch.nn.init.uniform_ = skip
-    torch.nn.init.normal_ = skip
-    from transformers import LlamaForCausalLM
-    model = LlamaForCausalLM.from_pretrained(model, torch_dtype='auto')
-    model.seqlen = 2048
+def get_llama(model_path: str) -> LlamaForCausalLM:
+    nn.init.kaiming_uniform_ = nn.init.uniform_ = nn.init.normal_ = lambda *args, **kwargs: None
+    model = LlamaForCausalLM.from_pretrained(pretrained_model_name_or_path=model_path, torch_dtype='auto')
     return model
 
+
 @torch.no_grad()
-def llama_sequential(model, dataloader, dev):
-    print('Starting ...')
+def get_initial_inputs(
+        model: LlamaForCausalLM, encodings: torch.Tensor, device: torch.device, batch_size: int = 1,
+) -> tuple[torch.Tensor, dict]:
+    """
+    catch first layer's input
+    encodings: (B, N=SeqLen), int64
+    inps: inputs, (B, N=SeqLen, D), float16
+    attention_mask = None
+    position_ids: (1, N=SeqLen), int64
+    past_key_value: None
+    output_attentions: bool = False
+    use_cache: bool = False
+    cache_position: (N=SeqLen), int64
+    position_embeddings: tuple, FP16, (1, N=SeqLen, 128), (1, N=SeqLen, 128)
+    """
+    catcher: Catcher = Catcher()
+    gpt_blocks: nn.ModuleList = model.model.layers
 
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-    layers = model.model.layers
+    gpt_block_0, gpt_blocks[0] = gpt_blocks[0], catcher
+    use_cache, model.config.use_cache = model.config.use_cache, False
+    model.model.embed_tokens.to(device=device)
+    model.model.rotary_emb.to(device=device)
+    # model.model.norm.to(device=device)
 
-    model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.norm = model.model.norm.to(dev)
-    model.model.rotary_emb = model.model.rotary_emb.to(dev)
-    layers[0] = layers[0].to(dev)
-
-    dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros(
-        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
-    )
-    cache = {'i': 0, 'attention_mask': None}
-
-    class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
-            self.module = module
-        def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp
-            cache['i'] += 1
-            cache['kwargs'] = kwargs
-            raise ValueError
-    layers[0] = Catcher(layers[0])
-    for batch in dataloader:
+    for bi in range(0, len(encodings), batch_size):
         try:
-            model(batch[None].to(dev))
+            model(encodings[bi : bi + batch_size].to(device=device))
         except ValueError:
             pass
-    layers[0] = layers[0].module
 
-    layers[0] = layers[0].cpu()
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.norm = model.model.norm.cpu()
-    torch.cuda.empty_cache()
+    inps: torch.Tensor = torch.cat(catcher.inps, dim=0)
+    inp_kwargs: dict = catcher.inp_kwargs
 
-    outs = torch.zeros_like(inps)
-    attention_kwargs = cache['kwargs']
-
-    print('Ready.')
-
-    quantizers = {}
-    for i in range(len(layers)):
-        layer = layers[i].to(dev)
-        full = find_layers(layer)
-
-        if args.true_sequential:
-            sequential = [
-                ['self_attn.k_proj', 'self_attn.v_proj', 'self_attn.q_proj'],
-                ['self_attn.o_proj'],
-                ['mlp.up_proj', 'mlp.gate_proj'],
-                ['mlp.down_proj']
-            ]
-        else:
-            sequential = [list(full.keys())]
-       
-        for names in sequential:
-            subset = {n: full[n] for n in names}
-
-            gptq = {}
-            for name in subset:
-                gptq[name] = GPTQ(subset[name])
-                gptq[name].quantizer = Quantizer()
-                gptq[name].quantizer.configure(
-                    args.wbits, perchannel=True, sym=args.sym, mse=False
-                )
-
-            def add_batch(name):
-                def tmp(_, inp, out):
-                    gptq[name].add_batch(inp[0].data, out.data)
-                return tmp
-            handles = []
-            for name in subset:
-                handles.append(subset[name].register_forward_hook(add_batch(name)))
-            for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), **attention_kwargs)[0]
-            for h in handles:
-                h.remove()
-
-            for name in subset:
-                print(i, name)
-                print('Quantizing ...')
-                gptq[name].fasterquant(
-                    percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
-                )
-                quantizers['model.layers.%d.%s' % (i, name)] = gptq[name].quantizer
-                gptq[name].free()
-
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), **attention_kwargs)[0]
-
-        layers[i] = layer.cpu()
-        del layer
-        del gptq 
-        torch.cuda.empty_cache()
-
-        inps, outs = outs, inps
-
+    gpt_blocks[0] = gpt_block_0
+    model.model.embed_tokens.cpu()
+    model.model.rotary_emb.cpu()
+    # model.model.norm.cpu()
     model.config.use_cache = use_cache
-    
-    return quantizers
+    return inps.cpu(), move_to_device(inp_kwargs, torch.device('cpu'))
+
 
 @torch.no_grad()
-def llama_eval(model, input_ids, dev):
-    print('Evaluating ...')
+def quantize_llama(model, encodings, device, batch_size=8):
+    """
+    start quantize
+    """
+    _input, _output = 'input', 'output'
+    cpu_device: torch.device = torch.device('cpu')
+    inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size)
+    use_cache, model.config.use_cache = model.config.use_cache, False
 
-    nsamples = input_ids.numel() // model.seqlen
+    results: dict[str, dict] = {
+        'data': {},  # dict[str, list]
+        'metrics': {},  # dict[str, list[dict[str, Any]]]
+    }
 
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-    layers = model.model.layers
+    gpt_blocks: nn.ModuleList = model.model.layers
 
-    model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.rotary_emb = model.model.rotary_emb.to(dev)
-    layers[0] = layers[0].to(dev)
+    for gi, gpt_block in enumerate(gpt_blocks):
+        start_time = time.time()
 
-    dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros(
-        (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
-    )
-    cache = {'i': 0, 'attention_mask': None}
+        dependency_info: list = extract_dependencies(gpt_block, [nn.Linear], inps.shape, inps.dtype, cpu_device, inp_kwargs)
 
-    class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
-            self.module = module
-        def forward(self, inp, **kwargs):
-            inps[cache['i']] = inp
-            cache['i'] += 1
-            cache['kwargs'] = kwargs
-            raise ValueError
-    layers[0] = Catcher(layers[0])
-    for i in range(nsamples):
-        batch = input_ids[i:i+1].to(dev)
-        try:
-            model(batch)
-        except ValueError:
-            pass
-    layers[0] = layers[0].module
+        wrapper_layers_dict: dict[str, RecorderWrapper] = {}
+        for linear_layer_name, linear_layer_module in find_submodules_by_types(gpt_block, [nn.Linear]).items():
+            linear_layer_wrapper = RecorderWrapper(linear_layer_module)
+            linear_layer_wrapper.stage = RecorderWrapper.stage_fake_mode
+            wrapper_layers_dict[linear_layer_name] = linear_layer_wrapper
+            find_and_replace_submodule_by_name(gpt_block, linear_layer_name, linear_layer_wrapper)
 
-    layers[0] = layers[0].cpu()
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    torch.cuda.empty_cache()
+        gpt_block.input_layernorm.to(device=device)
+        gpt_block.post_attention_layernorm.to(device=device)
 
-    outs = torch.zeros_like(inps)
-    attention_kwargs = cache['kwargs']
+        for di, (quantizing_layer_names, to_release_layer_names) in enumerate(dependency_info):
+            if quantizing_layer_names == [_output]:
+                break
 
-    for i in range(len(layers)):
-        print(i)
-        layer = layers[i].to(dev)
-        
-        if args.nearest:
-            subset = find_layers(layer)
-            for name in subset:
-                quantizer = Quantizer()
-                quantizer.configure(
-                    args.wbits, perchannel=True, sym=False, mse=False
+            hessian_hook = HessianHook()
+            for quantizing_layer_name in quantizing_layer_names:
+                quantizing_layer_wrapper = wrapper_layers_dict[quantizing_layer_name]
+                quantizing_layer_wrapper.hessian_hook = hessian_hook
+                quantizing_layer_wrapper.stage = RecorderWrapper.stage_hessian_accumulation
+            inp_kwargs_gpu = move_to_device(inp_kwargs, device=device)
+            for bi in range(0, len(inps), batch_size):
+                try:
+                    gpt_block(inps[bi : bi + batch_size].to(device=device), **inp_kwargs_gpu)
+                except ValueError:
+                    pass
+            del inp_kwargs_gpu
+            hessian_hook.invert(damp_ratio=1e-2, act_order=True)
+
+            for quantizing_layer_name in quantizing_layer_names:
+                assert quantizing_layer_name not in [_input, _output]
+                quantizing_layer_wrapper = wrapper_layers_dict[quantizing_layer_name]
+                weight = quantizing_layer_wrapper.module.weight.to(device=device)
+                n_out_features, n_in_features = weight.shape
+                group_sizes: torch.Tensor = torch.full([n_in_features // 128], 128, dtype=torch.int32, device=device)
+                group_bit_widths: torch.Tensor = torch.full([n_in_features // 128], 4, dtype=torch.int32, device=device)
+                gptq_result: dict[str, dict] = gptq_quant(
+                    weight=weight,
+                    hessian_hook=hessian_hook,
+                    group_sizes=group_sizes,
+                    group_bit_widths=group_bit_widths,
+                    scale_bit_width=None,
+                    gptq_use_kernel=False,
+                    gptq_block_sizes=group_sizes,
+                    quant_symmetric=False,
+                    quant_mse=True,
+                    quant_max_shrink=.8,
+                    quant_n_grid=100,
+                    quant_norm=2.4,
+                    quant_use_kernel=False,
                 )
-                W = subset[name].weight.data
-                quantizer.find_params(W, weight=True)
-                subset[name].weight.data = quantize(
-                    W, quantizer.scale, quantizer.zero, quantizer.maxq
-                ).to(next(iter(layer.parameters())).dtype)
+                quant_meta: dict[str, torch.Tensor | None] = gptq_result['quant_meta']
+                quantizing_layer_wrapper.hessian_hook = None
+                quantizing_layer_wrapper.module = reconstruct_nn_linear(quant_meta, device).cpu()
+                metrics: dict[str, float] = gptq_result['metrics']
+                print(gi, quantizing_layer_name, metrics)
 
-        for j in range(nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), **attention_kwargs)[0]
-        layers[i] = layer.cpu()
-        del layer
-        torch.cuda.empty_cache()
+            for quantizing_layer_name in quantizing_layer_names:
+                quantizing_layer_wrapper = wrapper_layers_dict[quantizing_layer_name]
+                quantizing_layer_wrapper.module.to(device=device)
+                quantizing_layer_wrapper.stage = RecorderWrapper.stage_recording_mode
+            inp_kwargs_gpu = move_to_device(inp_kwargs, device=device)
+            for bi in range(0, len(inps), batch_size):
+                gpt_block(inps[bi : bi + batch_size].to(device=device), **inp_kwargs_gpu)
+            del inp_kwargs_gpu
+            for quantizing_layer_name in quantizing_layer_names:
+                quantizing_layer_wrapper = wrapper_layers_dict[quantizing_layer_name]
+                quantizing_layer_wrapper.module.cpu()
+                quantizing_layer_wrapper.stage = RecorderWrapper.stage_replay_mode
+
+            for to_release_layer_name in to_release_layer_names:
+                if to_release_layer_name == _input:
+                    inps = RecorderWrapper.fake_mode.from_tensor(inps)
+                    continue
+                to_release_layer_wrapper = wrapper_layers_dict[to_release_layer_name]
+                to_release_layer_wrapper.outs = []
+                to_release_layer_wrapper.stage = RecorderWrapper.stage_fake_mode
+
+        outs = torch.empty(*inps.shape, dtype=inps.dtype, device=cpu_device)
+        inp_kwargs_gpu = move_to_device(inp_kwargs, device=device)
+        for bi in range(0, len(inps), batch_size):
+            (outs[bi : bi + batch_size],) = gpt_block(inps[bi : bi + batch_size].to(device=device), **inp_kwargs_gpu)
+        del inp_kwargs_gpu
+        inps = outs
+
+        gpt_block.input_layernorm.cpu()
+        gpt_block.post_attention_layernorm.cpu()
+
+        for linear_layer_name, linear_layer_wrapper in wrapper_layers_dict.items():
+            find_and_replace_submodule_by_name(gpt_block, linear_layer_name, linear_layer_wrapper.module)
+
+    return None
+
+
+@torch.no_grad()
+def evaluate_llama(
+        model: LlamaForCausalLM, encodings: torch.Tensor, device: torch.device, batch_size: int = 8,
+) -> torch.Tensor:
+    inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size)
+    inp_kwargs = move_to_device(inp_kwargs, device=device)
+    use_cache, model.config.use_cache = model.config.use_cache, False
+
+    layers: nn.ModuleList = model.model.layers
+    outs = torch.empty_like(inps)
+
+    for i, layer in tqdm(enumerate(layers)):
+        layer.to(device)
+        for j in range(0, len(inps), batch_size):
+            (outs[j:j+batch_size],) = layer(inps[j:j+batch_size].to(device=device), **inp_kwargs)
+        layer.cpu()
         inps, outs = outs, inps
 
     if model.model.norm is not None:
-        model.model.norm = model.model.norm.to(dev)
-    model.lm_head = model.lm_head.to(dev)
+        model.model.norm.to(device=device)
+        for j in range(0, len(inps), batch_size):
+            outs[j:j+batch_size] = model.model.norm(inps[j:j+batch_size].to(device=device))
+        inps, outs = outs, inps
 
-    input_ids = input_ids.to(dev)
+    model.lm_head = model.lm_head.to(device=device)
+    loss_fct = nn.CrossEntropyLoss()
     nlls = []
-    for i in range(nsamples):
-        hidden_states = inps[i].unsqueeze(0)
-        if model.model.norm is not None:
-            hidden_states = model.model.norm(hidden_states)
-        lm_logits = model.lm_head(hidden_states)
-        shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[i:i+1, 1:]
-        loss_fct = nn.CrossEntropyLoss()
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        neg_log_likelihood = loss.float() * model.seqlen
-        nlls.append(neg_log_likelihood)
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
-    print(ppl.item())
+    for i in range(0, len(inps), batch_size):
+        lm_logits = model.lm_head(inps[i:i+batch_size].to(device=device))  # (B, N=SeqLen, D)
+        shift_logits = lm_logits[:, :-1, :]  # (B, N=SeqLen-1, D)
+        shift_labels = encodings[i:i+batch_size, 1:].to(device=device)  # (B, N=SeqLen-1)
+        neg_log_likelihood = loss_fct(shift_logits.flatten(end_dim=-2), shift_labels.flatten())
+        nlls.extend([neg_log_likelihood] * len(lm_logits))
+    ppl = torch.stack(nlls).to(dtype=torch.float32).mean().exp()
 
+    model.model.norm.cpu()
     model.config.use_cache = use_cache
+    return ppl
 
 
 if __name__ == '__main__':
@@ -289,12 +285,14 @@ if __name__ == '__main__':
     model.eval()
 
     dataloader = get_dataloader(
-       name=args.dataset, split='train', seqlen=model.seqlen, n_samples=args.nsamples, model_path=args.model, seed=args.seed, cache_dir='./cache/datasets'
+       name=args.dataset, split='train', seqlen=2048, n_samples=args.nsamples, model_path=args.model, seed=args.seed, cache_dir='./cache/datasets'
     )
+
+    DEV = torch.device('cuda:0')
 
     if args.wbits < 16 and not args.nearest:
         tick = time.time()
-        quantizers = llama_sequential(model, dataloader, DEV)
+        quantizers = quantize_llama(model, dataloader, DEV)
         print(time.time() - tick)
 
     datasets = ['wikitext2', 'ptb', 'c4'] 
@@ -302,7 +300,8 @@ if __name__ == '__main__':
         datasets = ['wikitext2', 'ptb', 'c4-new']
     for dataset in datasets:
         testloader = get_dataloader(
-            name=dataset, split='test', seqlen=model.seqlen, n_samples=args.nsamples, model_path=args.model, seed=args.seed, cache_dir='./cache/datasets'
+            name=dataset, split='test', seqlen=2048, n_samples=args.nsamples, model_path=args.model, seed=args.seed, cache_dir='./cache/datasets'
         )
         print(dataset)
-        llama_eval(model, testloader, DEV)
+        ppl = evaluate_llama(model, testloader, DEV)
+        print(ppl.item())
