@@ -6,12 +6,9 @@ from torch import nn
 from tqdm import tqdm
 from transformers import LlamaForCausalLM
 
-
-from data_utils import get_dataloader
-from model_utils import Catcher, find_submodules_by_types, extract_dependencies, find_and_replace_submodule_by_name, \
-    move_to_device, RecorderWrapper
-from quant import reconstruct_nn_linear
 from gptq_py import HessianHook, gptq_quant
+from model_utils import move_to_device, find_submodules_by_types, find_and_replace_submodule_by_name, extract_dependencies, Catcher, RecorderWrapper
+from quant import reconstruct_nn_linear
 
 
 def get_llama(model_path: str) -> LlamaForCausalLM:
@@ -22,7 +19,10 @@ def get_llama(model_path: str) -> LlamaForCausalLM:
 
 @torch.no_grad()
 def get_initial_inputs(
-        model: LlamaForCausalLM, encodings: torch.Tensor, device: torch.device, batch_size: int = 1,
+        model: LlamaForCausalLM,
+        encodings: torch.Tensor,
+        device: torch.device,
+        batch_size: int = 1,
 ) -> tuple[torch.Tensor, dict]:
     """
     catch first layer's input
@@ -61,7 +61,12 @@ def get_initial_inputs(
 
 
 @torch.no_grad()
-def quantize_llama(model, encodings, device, batch_size=8):
+def quantize_llama(
+        model: LlamaForCausalLM,
+        encodings: torch.Tensor,
+        device: torch.device,
+        batch_size: int = 1,
+) -> dict[str, dict[str, dict]]:
     """
     start quantize
     """
@@ -70,18 +75,20 @@ def quantize_llama(model, encodings, device, batch_size=8):
     inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size)
     use_cache, model.config.use_cache = model.config.use_cache, False
 
-    results: dict[str, dict] = {
-        'data': {},  # dict[str, list]
-        'metrics': {},  # dict[str, list[dict[str, Any]]]
+    results: dict[str, dict[str, dict]] = {
+        'data': {},  # dict[str, dict[str, torch.Tensor | None]]
+        'metrics': {},  # dict[str, dict[str, float]]
     }
 
     gpt_blocks: nn.ModuleList = model.model.layers
 
     for gi, gpt_block in enumerate(gpt_blocks):
-        start_time = time.time()
+        block_start_time = time.time()
 
+        # find dependency info
         dependency_info: list = extract_dependencies(gpt_block, [nn.Linear], inps.shape, inps.dtype, cpu_device, inp_kwargs)
 
+        # wrap layers
         wrapper_layers_dict: dict[str, RecorderWrapper] = {}
         for linear_layer_name, linear_layer_module in find_submodules_by_types(gpt_block, [nn.Linear]).items():
             linear_layer_wrapper = RecorderWrapper(linear_layer_module)
@@ -89,13 +96,16 @@ def quantize_llama(model, encodings, device, batch_size=8):
             wrapper_layers_dict[linear_layer_name] = linear_layer_wrapper
             find_and_replace_submodule_by_name(gpt_block, linear_layer_name, linear_layer_wrapper)
 
+        # move norm layers to gpu
         gpt_block.input_layernorm.to(device=device)
         gpt_block.post_attention_layernorm.to(device=device)
 
+        # start quantization
         for di, (quantizing_layer_names, to_release_layer_names) in enumerate(dependency_info):
             if quantizing_layer_names == [_output]:
                 break
 
+            # compute hessian
             hessian_hook = HessianHook()
             for quantizing_layer_name in quantizing_layer_names:
                 quantizing_layer_wrapper = wrapper_layers_dict[quantizing_layer_name]
@@ -110,6 +120,7 @@ def quantize_llama(model, encodings, device, batch_size=8):
             del inp_kwargs_gpu
             hessian_hook.invert(damp_ratio=1e-2, act_order=True)
 
+            # quantize a layer
             for quantizing_layer_name in quantizing_layer_names:
                 assert quantizing_layer_name not in [_input, _output]
                 quantizing_layer_wrapper = wrapper_layers_dict[quantizing_layer_name]
@@ -132,12 +143,16 @@ def quantize_llama(model, encodings, device, batch_size=8):
                     quant_norm=2.4,
                     quant_use_kernel=False,
                 )
+                canonical_name = f'model.layers.{gi}.{quantizing_layer_name}'
                 quant_meta: dict[str, torch.Tensor | None] = gptq_result['quant_meta']
+                results['data'][canonical_name] = quant_meta
                 quantizing_layer_wrapper.hessian_hook = None
                 quantizing_layer_wrapper.module = reconstruct_nn_linear(quant_meta, device).cpu()
                 metrics: dict[str, float] = gptq_result['metrics']
-                print(gi, quantizing_layer_name, metrics)
+                results['metrics'][canonical_name] = metrics
+                logging.debug(f'{canonical_name} {metrics}')
 
+            # reconstruct layer and record outputs
             for quantizing_layer_name in quantizing_layer_names:
                 quantizing_layer_wrapper = wrapper_layers_dict[quantizing_layer_name]
                 quantizing_layer_wrapper.module.to(device=device)
@@ -151,6 +166,7 @@ def quantize_llama(model, encodings, device, batch_size=8):
                 quantizing_layer_wrapper.module.cpu()
                 quantizing_layer_wrapper.stage = RecorderWrapper.stage_replay_mode
 
+            # parent layers no longer needed: output fake tensors
             for to_release_layer_name in to_release_layer_names:
                 if to_release_layer_name == _input:
                     inps = RecorderWrapper.fake_mode.from_tensor(inps)
@@ -159,6 +175,7 @@ def quantize_llama(model, encodings, device, batch_size=8):
                 to_release_layer_wrapper.outs = []
                 to_release_layer_wrapper.stage = RecorderWrapper.stage_fake_mode
 
+        # inputs of the next block
         outs = torch.empty(*inps.shape, dtype=inps.dtype, device=cpu_device)
         inp_kwargs_gpu = move_to_device(inp_kwargs, device=device)
         for bi in range(0, len(inps), batch_size):
@@ -166,18 +183,26 @@ def quantize_llama(model, encodings, device, batch_size=8):
         del inp_kwargs_gpu
         inps = outs
 
+        # move norm layers to cpu
         gpt_block.input_layernorm.cpu()
         gpt_block.post_attention_layernorm.cpu()
 
+        # un-wrap layers
         for linear_layer_name, linear_layer_wrapper in wrapper_layers_dict.items():
             find_and_replace_submodule_by_name(gpt_block, linear_layer_name, linear_layer_wrapper.module)
 
-    return None
+        block_end_time = time.time()
+        logging.info(f'finished block {gi} in {block_end_time - block_start_time:.2f} s')
+
+    return results
 
 
 @torch.no_grad()
 def evaluate_llama(
-        model: LlamaForCausalLM, encodings: torch.Tensor, device: torch.device, batch_size: int = 8,
+        model: LlamaForCausalLM,
+        encodings: torch.Tensor,
+        device: torch.device,
+        batch_size: int = 1,
 ) -> torch.Tensor:
     inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size)
     inp_kwargs = move_to_device(inp_kwargs, device=device)
@@ -213,93 +238,3 @@ def evaluate_llama(
     model.model.norm.cpu()
     model.config.use_cache = use_cache
     return ppl
-
-
-if __name__ == '__main__':
-    import argparse
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        'model', type=str,
-        help='LlaMa model to load; pass location of hugginface converted checkpoint.'
-    )
-    parser.add_argument(
-        'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
-        help='Where to extract calibration data from.'
-    )
-    parser.add_argument(
-        '--seed',
-        type=int, default=0, help='Seed for sampling the calibration data.'
-    )
-    parser.add_argument(
-        '--nsamples', type=int, default=128,
-        help='Number of calibration data samples.'
-    )
-    parser.add_argument(
-        '--percdamp', type=float, default=.01,
-        help='Percent of the average Hessian diagonal to use for dampening.'
-    )
-    parser.add_argument(
-        '--nearest', action='store_true',
-        help='Whether to run the RTN baseline.'
-    ) 
-    parser.add_argument(
-        '--wbits', type=int, default=16, choices=[2, 3, 4, 8, 16],
-        help='#bits to use for quantization; use 16 for evaluating base model.'
-    )
-    parser.add_argument(
-        '--groupsize', type=int, default=-1,
-        help='Groupsize to use for quantization; default uses full row.'
-    )
-    parser.add_argument(
-        '--sym', action='store_true',
-        help='Whether to perform symmetric quantization.'
-    )
-    parser.add_argument(
-        '--save', type=str, default='',
-        help='Save quantized checkpoint under this name.'
-    )
-    parser.add_argument(
-        '--new-eval', action='store_true',
-        help='Whether to use the new PTB and C4 eval.'
-    )
-    parser.add_argument(
-        '--act-order', action='store_true',
-        help='Whether to apply the activation order GPTQ heuristic'
-    )
-    parser.add_argument(
-        '--true-sequential', action='store_true',
-        help='Whether to run in true sequential model.'
-    )
-    parser.add_argument(
-        '--static-groups', action='store_true',
-        help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
-    )
-
-    args = parser.parse_args()
-
-    model = get_llama(args.model)
-    model.eval()
-
-    dataloader = get_dataloader(
-       name=args.dataset, split='train', seqlen=2048, n_samples=args.nsamples, model_path=args.model, seed=args.seed, cache_dir='./cache/datasets'
-    )
-
-    DEV = torch.device('cuda:0')
-
-    if args.wbits < 16 and not args.nearest:
-        tick = time.time()
-        quantizers = quantize_llama(model, dataloader, DEV)
-        print(time.time() - tick)
-
-    datasets = ['wikitext2', 'ptb', 'c4'] 
-    if args.new_eval:
-        datasets = ['wikitext2', 'c4-new']
-    for dataset in datasets:
-        testloader = get_dataloader(
-            name=dataset, split='test', seqlen=2048, n_samples=args.nsamples, model_path=args.model, seed=args.seed, cache_dir='./cache/datasets'
-        )
-        print(dataset)
-        ppl = evaluate_llama(model, testloader, DEV)
-        print(ppl.item())

@@ -1,4 +1,4 @@
-// https://github.com/4PiR2/exllamav2/blob/gptq/exllamav2/exllamav2_ext/cuda/quantize.cu
+// https://github.com/turboderp/exllamav2/blob/master/exllamav2/exllamav2_ext/cuda/quantize.cu
 
 
 #include <cuda.h>

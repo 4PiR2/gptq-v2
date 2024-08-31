@@ -1,4 +1,4 @@
-// https://github.com/4PiR2/exllamav2/blob/gptq/exllamav2/exllamav2_ext/cpp/quantize_func.cpp
+// https://github.com/turboderp/exllamav2/blob/master/exllamav2/exllamav2_ext/cpp/quantize_func.cpp
 
 
 #include <torch/torch.h>

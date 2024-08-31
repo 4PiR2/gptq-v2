@@ -1,9 +1,8 @@
 import torch
-from torch import nn
-
-from quant import Quantizer, collate_quantizers
 
 from gptq import accumulate_hessian, gptq_quantize_range
+
+from quant import Quantizer, collate_quantizers
 
 
 class HessianHook:
@@ -57,17 +56,6 @@ class HessianHook:
                 break
         assert max_try >= 0
         return self.hessian_inv
-
-
-class HessianHookWrapper(nn.Module):
-    def __init__(self, hessian_hook: HessianHook):
-        super().__init__()
-        self.hessian_hook: HessianHook = hessian_hook
-
-    @torch.no_grad()
-    def forward(self, hidden_states: torch.Tensor, *args, **kwargs):
-        self.hessian_hook.add_batch(hidden_states)
-        raise ValueError
 
 
 @torch.no_grad()
