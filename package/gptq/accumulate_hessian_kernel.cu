@@ -1,20 +1,12 @@
-#ifndef ACCUMULATE_HESSIAN_KERNEL_CUH
-#define ACCUMULATE_HESSIAN_KERNEL_CUH
-
-
 // https://developer.nvidia.com/blog/cutlass-linear-algebra-cuda/
 // https://github.com/NVIDIA/cutlass/blob/main/media/docs/fundamental_types.md
 
 
-#include <iostream>
-#include <cuda.h>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
 #include "cutlass/gemm/device/gemm.h"
 
 
 template<typename InputDtype, typename OutputDtype>
-inline int accumulate_hessian_kernel(
+inline int accumulate_hessian_cuda(
     void* mat_hessian,
     const void* mat_input,
     const int size_hidden,
@@ -55,24 +47,21 @@ inline int accumulate_hessian_kernel(
 }
 
 
-int accumulate_hessian_fp16_fp32_kernel(
+int accumulate_hessian_fp16_fp32_cuda(
     void* mat_hessian,
     const void* mat_input,
     const int size_hidden,
     const int size_batch
 ) {
-    return accumulate_hessian_kernel<cutlass::half_t, float>(mat_hessian, mat_input, size_hidden, size_batch);
+    return accumulate_hessian_cuda<cutlass::half_t, float>(mat_hessian, mat_input, size_hidden, size_batch);
 }
 
 
-int accumulate_hessian_bf16_fp32_kernel(
+int accumulate_hessian_bf16_fp32_cuda(
     void* mat_hessian,
     const void* mat_input,
     const int size_hidden,
     const int size_batch
 ) {
-    return accumulate_hessian_kernel<cutlass::bfloat16_t, float>(mat_hessian, mat_input, size_hidden, size_batch);
+    return accumulate_hessian_cuda<cutlass::bfloat16_t, float>(mat_hessian, mat_input, size_hidden, size_batch);
 }
-
-
-#endif

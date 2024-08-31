@@ -1,6 +1,9 @@
+// https://github.com/4PiR2/exllamav2/blob/gptq/exllamav2/exllamav2_ext/cuda/quantize.cu
+
+
 #include <cuda.h>
 #include <cuda_fp16.h>
-#include <curand_kernel.h>
+
 
 #define DIVIDE(x, size) (((x) + (size) - 1) / (size))
 
@@ -26,7 +29,7 @@ __global__ void fused_quantize_adjust_kernel
     int row,                                    // row index to quantize
     int rows,                                   // num rows
     int columns,                                // num columns
-    const float* __restrict__ qzero,            // 2^(bits - 1)
+    const float* __restrict__ qzero,            // input  qzero             [1, columns]
     float maxq                                  // (2^bits) - 1
 )
 {
@@ -107,7 +110,6 @@ void fused_quantize_adjust_cuda
 
 
 // Compute z = z - x.T @ y
-
 __global__ void vv_mul_sub_kernel
 (
     const float* __restrict__ x,

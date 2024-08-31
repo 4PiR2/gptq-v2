@@ -1,11 +1,9 @@
 import torch
 from torch import nn
 
-# from exllamav2.ext import exllamav2_ext as ext_c
-
 from quant import Quantizer, collate_quantizers
 
-from gptq import accumulate_hessian, quantize_range
+from gptq import accumulate_hessian, gptq_quantize_range
 
 
 class HessianHook:
@@ -136,7 +134,7 @@ def gptq_quant(
             qzero = quantizer.qzero[:, 0].contiguous()
             maxq = float(quantizer.maxq)
             hessian_inv = hessian_hook.hessian_inv.contiguous()
-            quantize_range(quant_t, scale, qweight_t, qzero, maxq, hessian_inv, weight_t, error_t, i1, i2)
+            gptq_quantize_range(quant_t, scale, qweight_t, qzero, maxq, hessian_inv, weight_t, error_t, i1, i2)
             # quant: (C, R), float32, out
             # scale: (R), float32, in
             # qweight: (C, R), int16, out

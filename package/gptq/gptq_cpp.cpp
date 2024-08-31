@@ -1,5 +1,7 @@
+// https://github.com/4PiR2/exllamav2/blob/gptq/exllamav2/exllamav2_ext/cpp/quantize_func.cpp
+
+
 #include <torch/torch.h>
-#include <c10/cuda/CUDAGuard.h>
 
 
 void fused_quantize_adjust_cuda
@@ -45,8 +47,6 @@ void quantize_range
     int columns = weights.size(1);
     int hcolumns = hessian_inv.size(1);
     TORCH_CHECK(hcolumns == weights.size(0), "H shape mismatch")
-
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(weights));
 
     for (int c = a; c < b; c++)
     {

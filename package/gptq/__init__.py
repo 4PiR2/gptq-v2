@@ -13,7 +13,7 @@ def accumulate_hessian(mat_hessian: torch.Tensor, mat_input: torch.Tensor) -> No
             raise NotImplementedError
 
 
-def quantize_range(
+def gptq_quantize_range(
     quant: torch.Tensor,
     scale: torch.Tensor,
     out_q: torch.Tensor,
@@ -25,4 +25,4 @@ def quantize_range(
     a: int,
     b: int,
 ) -> None:
-    gptq_c.quantize_range(quant, scale, out_q, qzero, maxq, hessian_inv, weights, error, a, b)
+    gptq_c.gptq_quantize_range(quant, scale, out_q, qzero, maxq, hessian_inv, weights, error, a, b)
