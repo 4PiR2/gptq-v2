@@ -108,7 +108,7 @@ class RecorderWrapper(nn.Module):
                     )
                 return out
             case RecorderWrapper.stage_hessian_accumulation:
-                self.hessian_hook.add_batch(hidden_states)
+                self.hessian_hook.add_batch(hidden_states, use_kernel=True)
                 raise ValueError
             case RecorderWrapper.stage_recording_mode:
                 out: torch.Tensor = self.module(hidden_states, **kwargs)

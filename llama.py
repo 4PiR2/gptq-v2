@@ -211,7 +211,7 @@ def evaluate_llama(
     layers: nn.ModuleList = model.model.layers
     outs = torch.empty_like(inps)
 
-    for i, layer in tqdm(enumerate(layers)):
+    for i, layer in tqdm(enumerate(layers), total=len(layers)):
         layer.to(device)
         for j in range(0, len(inps), batch_size):
             (outs[j:j+batch_size],) = layer(inps[j:j+batch_size].to(device=device), **inp_kwargs)
