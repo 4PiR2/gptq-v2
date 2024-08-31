@@ -4,7 +4,7 @@ import setuptools
 from torch.utils import cpp_extension
 
 
-CUTLASS_PATH = '/nfs/scistore19/alistgrp/jiachen/cutlass'
+CUTLASS_PATH = os.path.join('.', 'cutlass')
 
 setuptools.setup(
     name='gptq',
