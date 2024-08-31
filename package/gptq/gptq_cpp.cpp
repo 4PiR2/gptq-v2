@@ -65,14 +65,17 @@ void quantize_range
             maxq
         );
 
-        vv_mul_sub_cuda
-        (
-            ((const float*) hessian_inv.data_ptr()) + (uint64_t)c * (uint64_t)hcolumns + (uint64_t)c,
-            ((const float*) error.data_ptr()) + (uint64_t)c * (uint64_t)columns,
-            ((float*) weights.data_ptr()) + (uint64_t)c * (uint64_t)columns,
-            b - c,
-            columns
-        );
+        if (c + 1 < b)
+        {
+            vv_mul_sub_cuda
+            (
+                ((const float*) hessian_inv.data_ptr()) + (uint64_t)c * (uint64_t)hcolumns + (uint64_t)(c + 1),
+                ((const float*) error.data_ptr()) + (uint64_t)c * (uint64_t)columns,
+                ((float*) weights.data_ptr()) + (uint64_t)(c + 1) * (uint64_t)columns,
+                b - (c + 1),
+                columns
+            );
+        }
     }
 
     torch::Tensor x = hessian_inv.slice(0, a, b).slice(1, b).transpose(0, 1);

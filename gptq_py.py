@@ -165,7 +165,7 @@ def gptq_quant(
                 quant[:, j: j + 1] = q = quantizer.dequantize(qw)
                 error[:, j: j + 1] = error_block[:, j - i1: j - i1 + 1] \
                     = err = (w - q) / hessian_hook.hessian_inv[j, j]
-                # here is different from paper and kernel: no need to update weight_block[:, j - i1]
+                # here is different from paper: no need to update weight_block[:, j - i1]
                 weight_block[:, j - i1 + 1:] -= err @ hessian_hook.hessian_inv[j: j + 1, j + 1: i2]
             weight[:, i2:] -= error_block @ hessian_hook.hessian_inv[i1:i2, i2:]
 
