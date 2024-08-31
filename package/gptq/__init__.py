@@ -11,3 +11,18 @@ def accumulate_hessian(mat_hessian: torch.Tensor, mat_input: torch.Tensor) -> No
             gptq_c.accumulate_hessian_bf16_fp32(mat_hessian, mat_input)
         case _:
             raise NotImplementedError
+
+
+def quantize_range(
+    quant: torch.Tensor,
+    scale: torch.Tensor,
+    out_q: torch.Tensor,
+    qzero: torch.Tensor,
+    maxq: float,
+    hessian_inv: torch.Tensor,
+    weights: torch.Tensor,
+    error: torch.Tensor,
+    a: int,
+    b: int,
+) -> None:
+    gptq_c.quantize_range(quant, scale, out_q, qzero, maxq, hessian_inv, weights, error, a, b)
