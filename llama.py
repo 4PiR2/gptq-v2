@@ -8,10 +8,10 @@ from transformers import LlamaForCausalLM
 
 
 from data_utils import get_dataloader
-from layer_wrappers import Catcher, find_submodules_by_types, extract_dependencies, find_and_replace_submodule_by_name, \
+from model_utils import Catcher, find_submodules_by_types, extract_dependencies, find_and_replace_submodule_by_name, \
     move_to_device, RecorderWrapper
-from quant_2 import reconstruct_nn_linear
-from gptq_2 import HessianHook, gptq_quant
+from quant import reconstruct_nn_linear
+from gptq_py import HessianHook, gptq_quant
 
 
 def get_llama(model_path: str) -> LlamaForCausalLM:
@@ -43,7 +43,6 @@ def get_initial_inputs(
     use_cache, model.config.use_cache = model.config.use_cache, False
     model.model.embed_tokens.to(device=device)
     model.model.rotary_emb.to(device=device)
-    # model.model.norm.to(device=device)
 
     for bi in range(0, len(encodings), batch_size):
         try:
@@ -57,7 +56,6 @@ def get_initial_inputs(
     gpt_blocks[0] = gpt_block_0
     model.model.embed_tokens.cpu()
     model.model.rotary_emb.cpu()
-    # model.model.norm.cpu()
     model.config.use_cache = use_cache
     return inps.cpu(), move_to_device(inp_kwargs, torch.device('cpu'))
 
@@ -297,7 +295,7 @@ if __name__ == '__main__':
 
     datasets = ['wikitext2', 'ptb', 'c4'] 
     if args.new_eval:
-        datasets = ['wikitext2', 'ptb', 'c4-new']
+        datasets = ['wikitext2', 'c4-new']
     for dataset in datasets:
         testloader = get_dataloader(
             name=dataset, split='test', seqlen=2048, n_samples=args.nsamples, model_path=args.model, seed=args.seed, cache_dir='./cache/datasets'

@@ -3,10 +3,12 @@ from torch import nn
 
 # from exllamav2.ext import exllamav2_ext as ext_c
 
-from quant_2 import Quantizer, collate_quantizers
+from quant import Quantizer, collate_quantizers
+
+from gptq import accumulate_hessian
 
 
-class HessianHook(nn.Module):
+class HessianHook:
     def __init__(self):
         super().__init__()
         self.hessian: torch.Tensor | None = None
@@ -16,7 +18,7 @@ class HessianHook(nn.Module):
         self.perm_inv: torch.Tensor | None = None
 
     @torch.no_grad()
-    def add_batch(self, inp: torch.Tensor) -> None:
+    def add_batch(self, inp: torch.Tensor, use_kernel: bool = True) -> None:
         """
         inp: (..., N, D)
         """
@@ -24,18 +26,18 @@ class HessianHook(nn.Module):
         assert not hasattr(inp, 'fake_mode')
         if inp.dim() <= 2:
             inp = inp[None]
-        n_samples = len(inp)
-        self.n_samples += n_samples
-        inp = (2. * n_samples) ** .5 * inp.flatten(end_dim=-2).float()
-        increase = inp.t() @ inp
-        if self.hessian is not None:
-            self.hessian += increase
-        else:
-            self.hessian = increase
+        self.n_samples += len(inp)
+        if self.hessian is None:
+            self.hessian = torch.zeros(inp.size(-1), inp.size(-1), dtype=torch.float32, device=inp.device)
+        inp = inp.flatten(end_dim=-2)
+        if not use_kernel:
+            inp = inp.to(dtype=torch.float32)
+            torch.addmm(self.hessian, inp.t(), inp, beta=1, alpha=1, out=self.hessian)  # self.hessian += inp.t() @ inp
+        accumulate_hessian(self.hessian, inp)
 
     @torch.no_grad()
     def invert(self, damp_ratio: float = 1e-2, act_order: bool = True) -> torch.Tensor:
-        self.hessian = self.hessian / self.n_samples
+        self.hessian = self.hessian * (2. / self.n_samples)
 
         dead: torch.Tensor = self.hessian.diag() == 0.
         self.hessian[dead, dead] = 1.

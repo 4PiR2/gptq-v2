@@ -1,213 +1,279 @@
-import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
+
+# from exllamav2.ext import exllamav2_ext as ext_c
 
 
-def quantize(x, scale, zero, maxq):
-    if maxq < 0:
-        return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
-    return scale * (q - zero)
+EPSILON = 1e-12
 
-class Quantizer(nn.Module):
 
-    def __init__(self, shape=1):
-        super(Quantizer, self).__init__()
-        self.register_buffer('maxq', torch.tensor(0))
-        self.register_buffer('scale', torch.zeros(shape))
-        self.register_buffer('zero', torch.zeros(shape))
+def quantize(x: torch.Tensor, scale: torch.Tensor, qzero: torch.Tensor, maxq: torch.Tensor) -> torch.Tensor:
+    """
+    quantize each row using a scale and a zero level
+    x: (..., C, ...), weight
+    scale: (..., 1, ...)
+    qzero: (..., 1, ...)
+    maxq: ()
+    return: (..., C, ...), quantized x, same dtype
+    """
+    return ((x / scale).round() + qzero).clamp(0., maxq)
 
-    def configure(
-        self,
-        bits, perchannel=False, sym=True, 
-        mse=False, norm=2.4, grid=100, maxshrink=.8,
-        trits=False
-    ):
-        self.maxq = torch.tensor(2 ** bits - 1)
-        self.perchannel = perchannel
-        self.sym = sym
-        self.mse = mse
-        self.norm = norm
-        self.grid = grid
-        self.maxshrink = maxshrink 
-        if trits:
-            self.maxq = torch.tensor(-1) 
 
-    def find_params(self, x, weight=False):
-        dev = x.device
-        self.maxq = self.maxq.to(dev)
+def dequantize(qx: torch.Tensor, scale: torch.Tensor, qzero: torch.Tensor) -> torch.Tensor:
+    """
+    dequantize each row using a scale and a zero level
+    qx: (..., C, ...)
+    scale: (..., 1, ...)
+    qzero: (..., 1, ...)
+    return: (..., C, ...)
+    """
+    return (qx - qzero) * scale
 
-        shape = x.shape
-        if self.perchannel:
-            if weight:
-                x = x.flatten(1)
-            else:
-                if len(shape) == 4:
-                    x = x.permute([1, 0, 2, 3])
-                    x = x.flatten(1)
-                if len(shape) == 3:
-                    x = x.reshape((-1, shape[-1])).t()
-                if len(shape) == 2:
-                    x = x.t()
+
+def dequantize_quantized(x: torch.Tensor, scale: torch.Tensor, qzero: torch.Tensor, maxq: torch.Tensor) -> torch.Tensor:
+    """
+    truncate the numbers by first quantize then dequantize
+    """
+    return dequantize(quantize(x, scale, qzero, maxq), scale, qzero)
+
+
+def quantize2(x: torch.Tensor, scale: torch.Tensor, maxq: torch.Tensor) -> torch.Tensor:
+    """
+    quadratic quantization, quantize each row using a scale
+    Quantize a column of scales for EXL2 format. Should only be used in addition to quantize().
+    x: (..., C, ...), > 0.
+    scale: (..., 1, ...)
+    maxq: ()
+    return: (..., C, ...), quantized x, same dtype
+    !!! Note: When calling ext_c.pack_rows_4(), the kernel function will -1 on all qscale elements.
+    The internal values are always reduced by 1 in kernel codes
+    """
+    return (x / scale).sqrt().round().clamp(1., maxq + 1.)
+
+
+def dequantize2(qx: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """
+    quadratic dequantization, quantize each row using a scale
+    Dequantize a column of scales for EXL2 format. Should only be used in addition to dequantize().
+    qx: (..., C, ...)
+    scale: (..., 1, ...)
+    return: (..., C, ...)
+    """
+    return qx * qx * scale
+
+
+def dequantize2_quantized2(x: torch.Tensor, scale: torch.Tensor, maxq: torch.Tensor) -> torch.Tensor:
+    """
+    truncate the numbers by first quantize then dequantize, using quadratic quantization
+    """
+    return dequantize2(quantize2(x, scale, maxq), scale)
+
+
+class Quantizer:
+    def __init__(self, scale: torch.Tensor = None, qzero: torch.Tensor = None, maxq: torch.Tensor = None,
+                 qscale: torch.Tensor = None, sscale: torch.Tensor = None, smaxq: torch.Tensor = None):
+        self.scale: torch.Tensor = scale  # (..., R, 1)
+        self.qzero: torch.Tensor = qzero  # (..., R, 1)
+        self.maxq: torch.Tensor = maxq  # ()
+
+        # only for EXL2 format:
+        self.qscale: torch.Tensor = qscale  # (..., R, 1)
+        self.sscale: torch.Tensor = sscale  # (..., 1, 1)
+        self.smaxq: torch.Tensor = smaxq  # ()
+
+        if self.scale is None and self.qscale is not None and self.sscale is not None:
+            self.scale = dequantize2(self.qscale, self.sscale)
+        elif self.qscale is None and self.scale is not None and self.sscale is not None and self.smaxq is not None:
+            self.qscale = quantize2(self.scale, self.sscale, self.smaxq)
+
+    def find_params(
+            self, x: torch.Tensor, bit_width: torch.Tensor, sym: bool = False, scale_bit_width: torch.Tensor = None,
+    ) -> None:
+        """
+        find quantization metadata over dim=-1
+        x: (..., R, C), weight
+        bit_width: int
+        sym: bool, whether to set qzero to the middle
+        scale_bit_width: (), int, used in EXL2, only works with sym = True
+        """
+        if scale_bit_width is not None and scale_bit_width > 0:
+            sym = True
+
+        self.maxq = 2. ** bit_width - 1.  # ()
+
+        if sym:
+            self.scale = x.abs().max(dim=-1, keepdim=True)[0] * (2. / self.maxq) + EPSILON  # (..., R, 1)
+            self.qzero = torch.full_like(self.scale, ((self.maxq + 1.) * .5).round())  # (..., R, 1)
+
+            if scale_bit_width is not None and scale_bit_width > 0:
+                self.smaxq = 2. ** scale_bit_width - 1.  # ()
+                self.sscale = self.scale.max(dim=-2, keepdim=True)[0] / (self.smaxq + 1.) ** 2. + EPSILON  # (..., 1, 1)
+                self.qscale = quantize2(self.scale, self.sscale, self.smaxq)  # (..., R, 1)
+                self.scale = dequantize2(self.qscale, self.sscale)  # (..., R, 1)
+
         else:
-            x = x.flatten().unsqueeze(0)
+            x_max = x.max(dim=-1, keepdim=True)[0].relu()  # (..., R, 1)
+            x_min = -(-x.min(dim=-1, keepdim=True)[0]).relu()  # (..., R, 1)
+            self.scale = (x_max - x_min) / self.maxq + EPSILON  # (..., R, 1)
+            self.qzero = (-x_min / self.scale).round()  # (..., R, 1)
 
-        tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
-
-        if self.sym:
-            xmax = torch.maximum(torch.abs(xmin), xmax)
-            tmp = xmin < 0
-            if torch.any(tmp):
-                xmin[tmp] = -xmax[tmp]
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin[tmp] = -1
-        xmax[tmp] = +1
-
-        if self.maxq < 0:
-          self.scale = xmax
-          self.zero = xmin
+    def mse(self, x: torch.Tensor, max_shrink: float = .8, n_grid: int = 100, norm: float = 2.4,
+            use_kernel: bool = False) -> None:
+        """
+        refine quantization metadata
+        mean squared error?
+        x: (..., R, C), weight
+        use_kernel: bool, use exllamav2 kernel, only works with 2D input tensor, same shrinking ratio for all rows
+        """
+        device: torch.device = x.device
+        if use_kernel:
+            assert x.dim() == 2
+            torch.cuda.set_device(device)  # exllama kernel requirement
+            min_p, max_p = .75, 1.
+            x = x.transpose(-2, -1).contiguous()  # (..., C, R)
+            err = torch.zeros(n_grid + 1, 128, dtype=torch.float32, device=device)
+            scale = self.scale[..., 0].contiguous()  # (..., R)
+            qzero = self.qzero[..., 0].contiguous()  # (..., R)
+            maxq = float(self.maxq)
+            ext_c.quantize_err(x, err, scale, qzero, maxq, norm, min_p, max_p, n_grid)
+            # x: (C, R), float32, contiguous, in
+            # err: (n_grid + 1, 128), float32, out
+            # scale: (R), float32, in
+            # qzero: (R), float32, in
+            # maxq, norm, min_p, max_p: float32, in
+            # n_grid: int, in
+            best_pi = err.sum(dim=-1).argmin() / n_grid  # ()
+            best_p = max_p * best_pi + min_p * (1. - best_pi)  # ()
+            self.scale *= best_p  # (..., R, 1)
+            if self.sscale is not None:
+                self.sscale *= best_p  # (..., 1, 1)
         else:
-          self.scale = (xmax - xmin) / self.maxq
-          if self.sym:
-              self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
-          else:
-              self.zero = torch.round(-xmin / self.scale)
+            p = 1. - torch.arange(0., max_shrink, 1. / n_grid, device=device)  # (Q)
+            q = dequantize_quantized(x[..., None], self.scale[..., None] * p, self.qzero[..., None], self.maxq)
+            # (..., R, C, Q)
+            err_argmin = (q - x[..., None]).abs().pow(norm).sum(dim=-2).argmin(dim=-1, keepdim=True)  # (..., R, 1)
+            self.scale *= p[err_argmin]  # (..., R, 1)
+            if self.sscale is not None:
+                self.sscale = self.scale.max(dim=-2, keepdim=True)[0] / (self.smaxq + 1.) ** 2. + EPSILON
+                # (..., 1, 1)
+                q = dequantize2_quantized2(self.scale[..., None], self.sscale[..., None] * p, self.smaxq)
+                # (..., R, 1, Q)
+                err_argmin = (q - self.scale[..., None]).abs().pow(norm).sum(dim=-3).argmin(dim=-1, keepdim=True)
+                # (..., 1, 1)
+                self.sscale *= p[err_argmin]  # (..., 1, 1)
+                self.qscale = quantize2(self.scale, self.sscale, self.smaxq)  # (..., R, 1)
+                self.scale = dequantize2(self.qscale, self.sscale)  # (..., R, 1)
 
-        if self.mse:
-            best = torch.full([x.shape[0]], float('inf'), device=dev)
-            for i in range(int(self.maxshrink * self.grid)):
-                p = 1 - i / self.grid 
-                xmin1 = p * xmin
-                xmax1 = p * xmax
-                scale1 = (xmax1 - xmin1) / self.maxq
-                zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
-                q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
-                q -= x
-                q.abs_()
-                q.pow_(self.norm)
-                err = torch.sum(q, 1)
-                tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[tmp]
-                    self.scale[tmp] = scale1[tmp]
-                    self.zero[tmp] = zero1[tmp]
-        if not self.perchannel:
-            if weight:
-                tmp = shape[0]
+    def quantize(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (..., R, C), weight
+        """
+        return quantize(x, self.scale, self.qzero, self.maxq)
+
+    def dequantize(self, qx: torch.Tensor) -> torch.Tensor:
+        """
+        qx: (..., R, C), qweight
+        """
+        return dequantize(qx, self.scale, self.qzero)
+
+    def dequantize_quantized(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (..., R, C), weight
+        """
+        return dequantize_quantized(x, self.scale, self.qzero, self.maxq)
+
+
+def collate_quantizers(*args):
+    """
+    aggregate quantizer information
+    input: Quantizer
+    """
+    # turn object into dicts
+    tensor_dicts = []
+    for a in args:
+        tensor_dict = {}
+        for attr_name in dir(a):
+            if attr_name.startswith('_'):
+                continue
+            attr_value = getattr(a, attr_name)
+            if isinstance(attr_value, torch.Tensor):
+                tensor_dict[attr_name] = attr_value
+        tensor_dicts.append(tensor_dict)
+
+    # aggregate by keys
+    aggregate_dict = {}
+    for d in tensor_dicts:
+        for key, value in d.items():
+            if key in aggregate_dict:
+                aggregate_dict[key].append(value)
             else:
-                tmp = shape[1] if len(shape) != 3 else shape[2]
-            self.scale = self.scale.repeat(tmp)
-            self.zero = self.zero.repeat(tmp)
+                aggregate_dict[key] = [value]
 
-        if weight:
-            shape = [-1] + [1] * (len(shape) - 1)
-            self.scale = self.scale.reshape(shape)
-            self.zero = self.zero.reshape(shape)
-            return
-        if len(shape) == 4:
-            self.scale = self.scale.reshape((1, -1, 1, 1))
-            self.zero = self.zero.reshape((1, -1, 1, 1))
-        if len(shape) == 3:
-            self.scale = self.scale.reshape((1, 1, -1))
-            self.zero = self.zero.reshape((1, 1, -1)) 
-        if len(shape) == 2:
-            self.scale = self.scale.unsqueeze(0)
-            self.zero = self.zero.unsqueeze(0)
-
-    def quantize(self, x):
-        if self.ready():
-            return quantize(x, self.scale, self.zero, self.maxq)
-        return x
-
-    def enabled(self):
-        return self.maxq > 0
-
-    def ready(self):
-        return torch.all(self.scale != 0)
+    # concatenate tensors
+    result = {}
+    for key, value in aggregate_dict.items():
+        if value[0].dim():
+            result[key] = torch.cat(value, dim=-1)
+        else:
+            result[key] = torch.stack(value)  # stack zero-dimension tensors
+    return result
 
 
-try:
-    import quant_cuda
-except:
-    print('CUDA extension not installed.')
+def construct_matrix(
+        qweight: torch.Tensor,  # (R, C), int16
+        scale: torch.Tensor,  # (R, G), float16
+        qzero: torch.Tensor,  # (R, G) or (G) or (), int16
+        group_sizes: torch.Tensor,  # (G), int16
+) -> torch.Tensor:
+    """
+    reconstruct matrix from aggregated quantizer information
+    """
+    qzero = qzero.expand(scale.shape)
+    group_ids: list[int] = [0] + group_sizes.cumsum(dim=-1).tolist()
+    weight = torch.empty_like(qweight, dtype=torch.float16, device=qweight.device)
+    for k in range(len(group_ids) - 1):
+        i1, i2 = group_ids[k], group_ids[k + 1]
+        weight[:, i1:i2] = Quantizer(scale=scale[:, k:k+1], qzero=qzero[:, k:k+1]).dequantize(qweight[:, i1:i2])
+    return weight
 
-# Assumes layer is perfectly divisible into 1024 * 1024 blocks
-class Quant3Linear(nn.Module): 
 
-    def __init__(self, infeatures, outfeatures, faster=False):
-        super().__init__()
-        self.register_buffer('zeros', torch.zeros((outfeatures, 1)))
-        self.register_buffer('scales', torch.zeros((outfeatures, 1)))
-        self.register_buffer('bias', torch.zeros(outfeatures))
-        self.register_buffer(
-            'qweight', torch.zeros((infeatures // 32 * 3, outfeatures), dtype=torch.int)
-        )
-        self.faster = faster
+def construct_matrix_2(
+        qweight: torch.Tensor,  # (R, C), int16
+        qzero: torch.Tensor,  # (R, G) or (G) or (), int16
+        qscale: torch.Tensor,  # (R, G), int16
+        sscale: torch.Tensor,  # (G), float16
+        group_sizes: torch.Tensor,  # (G), int16
+) -> torch.Tensor:
+    """
+    reconstruct matrix from aggregated quantizer information (EXL2)
+    """
+    qzero = qzero.expand(qscale.shape)
+    sscale = sscale.expand(1, sscale.size(-1))
+    group_ids: list[int] = [0] + group_sizes.cumsum(dim=-1).tolist()
+    weight = torch.empty_like(qweight, dtype=torch.float16, device=qweight.device)
+    for k in range(len(group_ids) - 1):
+        i1, i2 = group_ids[k], group_ids[k + 1]
+        weight[:, i1:i2] = Quantizer(
+            qzero=qzero[:, k:k+1], qscale=qscale[:, k:k+1], sscale=sscale[:, k:k + 1],
+        ).dequantize(qweight[:, i1:i2])
+    return weight
 
-    def pack(self, linear, scales, zeros):
-        self.zeros = zeros * scales
-        self.scales = scales.clone()
-        if linear.bias is not None:
-            self.bias = linear.bias.clone()
 
-        intweight = torch.round((linear.weight.data + self.zeros) / self.scales).to(torch.int)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.numpy().astype(np.uint32)
-        qweight = np.zeros(
-            (intweight.shape[0] // 32 * 3, intweight.shape[1]), dtype=np.uint32
-        )
-        i = 0
-        row = 0
-        while row < qweight.shape[0]:
-            for j in range(i, i + 10):
-                qweight[row] |= intweight[j] << (3 * (j - i))
-            i += 10
-            qweight[row] |= intweight[i] << 30
-            row += 1
-            qweight[row] |= (intweight[i] >> 2) & 1
-            i += 1
-            for j in range(i, i + 10):
-                qweight[row] |= intweight[j] << (3 * (j - i) + 1)
-            i += 10
-            qweight[row] |= intweight[i] << 31
-            row += 1
-            qweight[row] |= (intweight[i] >> 1) & 0x3
-            i += 1
-            for j in range(i, i + 10):
-                qweight[row] |= intweight[j] << (3 * (j - i) + 2)
-            i += 10
-            row += 1
-
-        qweight = qweight.astype(np.int32)
-        self.qweight = torch.from_numpy(qweight) 
-
-    def forward(self, x):
-        if x.shape[-1] == x.numel():
-            outshape = list(x.shape)
-            y = self.bias.clone()
-            outshape[-1] = self.bias.numel()
-            dtype = x.dtype
-            if self.faster:
-                x = x.half()
-                quant_cuda.vecquant3matmul_faster(x, self.qweight, y, self.scales, self.zeros)
-            else:
-                x = x.float()
-                quant_cuda.vecquant3matmul(x, self.qweight, y, self.scales, self.zeros)
-            y = y.to(dtype)
-            return y.reshape(outshape)
-        raise ValueError('Only supports a single token currently.')
-
-def make_quant3(module, names, name='', faster=False):
-    if isinstance(module, Quant3Linear):
-        return
-    for attr in dir(module):
-        tmp = getattr(module, attr)
-        name1 = name + '.' + attr if name != '' else attr
-        if name1 in names:
-            setattr(
-                module, attr, Quant3Linear(tmp.in_features, tmp.out_features, faster=faster)
-            )
-    for name1, child in module.named_children():
-        make_quant3(child, names, name + '.' + name1 if name != '' else name1, faster=faster)
+def reconstruct_nn_linear(quant_meta: dict, device: torch.device = torch.device('cpu')) -> nn.Linear:
+    qweight = quant_meta['qweight'].to(dtype=torch.int16, device=device)
+    qzero = quant_meta['qzero'].to(dtype=torch.int16, device=device)
+    group_sizes = quant_meta['group_sizes'].to(dtype=torch.int16, device=device)
+    if 'sscale' in quant_meta and quant_meta['sscale'] is not None:
+        qscale = quant_meta['qscale'].to(dtype=torch.int16, device=device)
+        sscale = quant_meta['sscale'].to(dtype=torch.float16, device=device)
+        weight = construct_matrix_2(qweight, qzero, qscale, sscale, group_sizes)
+    else:
+        scale = quant_meta['scale'].to(dtype=torch.float16, device=device)
+        weight = construct_matrix(qweight, scale, qzero, group_sizes)
+    if 'perm_inv' in quant_meta and quant_meta['perm_inv'] is not None:
+        perm_inv = quant_meta['perm_inv'].to(dtype=torch.int32, device=device)
+        weight = weight[:, perm_inv]
+    nn_linear = nn.Linear(*weight.shape[::-1], bias=False, dtype=torch.float16, device=weight.device)
+    nn_linear.weight.data = weight
+    nn_linear.eval()
+    return nn_linear

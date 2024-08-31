@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch._subclasses import FakeTensorMode
 
-from gptq_2 import HessianHook
+from gptq_py import HessianHook
 
 
 def move_to_device(nested_structure, device: torch.device = torch.device('cpu')):

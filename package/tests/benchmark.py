@@ -2,7 +2,7 @@ import time
 
 import torch
 
-import gptq
+import gptq_py
 
 
 device = torch.device('cuda:1')
