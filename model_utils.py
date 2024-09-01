@@ -67,25 +67,16 @@ def find_and_replace_submodule_by_name(
 
 
 class Catcher(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.inps: list[torch.Tensor] = []
-        self.inp_kwargs: dict = {}
-
     @torch.no_grad()
-    def forward(self, hidden_states: torch.Tensor, **kwargs):
-        # catch inputs
-        self.inps.append(hidden_states)
-        self.inp_kwargs = kwargs
-        raise ValueError
+    def forward(self, *args, **kwargs):
+        raise ValueError(args, kwargs)
 
 
 class RecorderWrapper(nn.Module):
     fake_mode: FakeTensorMode = FakeTensorMode(allow_fallback_kernels=False, allow_non_fake_inputs=True)
     stage_fake_mode: int = 0
     stage_hessian_accumulation: int = 1
-    stage_recording_mode: int = 2
-    stage_replay_mode: int = 3
+    stage_replay_mode: int = 2
 
     def __init__(self, module: nn.Module):
         super().__init__()
@@ -109,11 +100,7 @@ class RecorderWrapper(nn.Module):
                 return out
             case RecorderWrapper.stage_hessian_accumulation:
                 self.hessian_hook.add_batch(hidden_states, use_kernel=True)
-                raise ValueError
-            case RecorderWrapper.stage_recording_mode:
-                out: torch.Tensor = self.module(hidden_states, **kwargs)
-                self.outs.append(out.cpu())
-                return RecorderWrapper.fake_mode.from_tensor(out)
+                raise ValueError(hidden_states)
             case RecorderWrapper.stage_replay_mode:
                 out = self.outs[self.out_pointer]
                 self.out_pointer = (self.out_pointer + 1) % len(self.outs)
