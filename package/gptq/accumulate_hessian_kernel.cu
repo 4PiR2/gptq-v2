@@ -24,8 +24,8 @@ inline int accumulate_hessian_cuda(
         ElementAccumulator,
         cutlass::arch::OpClassTensorOp,
         cutlass::arch::Sm80,
-        cutlass::gemm::GemmShape<64, 64, 32>,  // 128
-        cutlass::gemm::GemmShape<32, 32, 32>,  // 64
+        cutlass::gemm::GemmShape<128, 128, 32>,  // 128
+        cutlass::gemm::GemmShape<64, 64, 32>,  // 64
         cutlass::gemm::GemmShape<16, 8, 16>,  // size of tensor core; do not change
         cutlass::epilogue::thread::LinearCombination<
             OutputDtype,

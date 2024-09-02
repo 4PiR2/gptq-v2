@@ -31,7 +31,7 @@ def main() -> None:
 
     if args.do_quant:
         tick = time.time()
-        results = quantize_llama(model=model, encodings=encodings_train, device=device, batch_size=args.batch_size)
+        results = quantize_llama(model=model, encodings=encodings_train, device=device, batch_size=args.batch_size, save_gpu_mem=False)
         logging.info(f'finished quantizing in {time.time() - tick:.2f} s')
 
         if model_save_path:
