@@ -35,7 +35,8 @@ class HessianHook:
 
     @torch.no_grad()
     def invert(self, damp_ratio: float = 1e-2, act_order: bool = True) -> torch.Tensor:
-        self.hessian: torch.Tensor = self.hessian * (2. / self.n_samples)
+        device: torch.device = self.hessian.device
+        self.hessian *= 2. / self.n_samples
 
         dead: torch.Tensor = self.hessian.diag() == 0.
         self.hessian[dead, dead] = 1.
@@ -45,14 +46,18 @@ class HessianHook:
             self.hessian: torch.Tensor = self.hessian[self.perm][:, self.perm]
             self.perm_inv: torch.Tensor = self.perm.argsort()
 
-        diag_indicies: torch.Tensor = torch.arange(len(self.hessian), device=self.hessian.device)
+        diag_indicies: torch.Tensor = torch.arange(len(self.hessian), device=device)
         damp: torch.Tensor = damp_ratio * self.hessian.diag().mean()
 
+        hessian_inv: torch.Tensor = torch.empty_like(self.hessian)
+        info: torch.Tensor = torch.empty((), dtype=torch.int32, device=device)
         max_try: int = 100
         while (max_try := max_try - 1) >= 0:
             self.hessian[diag_indicies, diag_indicies] += damp
-            self.hessian_inv = torch.linalg.cholesky(torch.cholesky_inverse(torch.linalg.cholesky(self.hessian)),
-                                                     upper=True)
+            torch.linalg.cholesky_ex(self.hessian, upper=False, check_errors=False, out=(hessian_inv, info))
+            torch.cholesky_inverse(hessian_inv, upper=False, out=hessian_inv)
+            torch.linalg.cholesky_ex(hessian_inv, upper=True, check_errors=False, out=(hessian_inv, info))
+            self.hessian_inv: torch.Tensor = hessian_inv
             if not self.hessian_inv.isnan().any():
                 break
         assert max_try >= 0

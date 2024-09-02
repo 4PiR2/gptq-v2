@@ -66,6 +66,7 @@ def quantize_llama(
         encodings: torch.Tensor,
         device: torch.device,
         batch_size: int = 1,
+        save_gpu_mem: bool = False,  # whether to save input tensors in cpu ram, may impact performance
 ) -> dict[str, dict[str, dict]]:
     """
     start quantize
@@ -74,6 +75,11 @@ def quantize_llama(
     cpu_device: torch.device = torch.device('cpu')
     inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size)
     use_cache, model.config.use_cache = model.config.use_cache, False
+    if not save_gpu_mem:
+        inps = inps.to(device=device)
+        inp_kwargs_gpu: dict | None = move_to_device(inp_kwargs, device=device)
+    else:
+        inp_kwargs_gpu: dict | None = None
 
     results: dict[str, dict[str, dict]] = {
         'data': {},  # dict[str, dict[str, torch.Tensor | None]]
@@ -112,13 +118,15 @@ def quantize_llama(
                 quantizing_layer_wrapper.hessian_hook = hessian_hook
                 quantizing_layer_wrapper.stage = RecorderWrapper.stage_hessian_accumulation
             hidden_states: list[torch.Tensor] = []
-            inp_kwargs_gpu: dict = move_to_device(inp_kwargs, device=device)
+            if save_gpu_mem:
+                inp_kwargs_gpu: dict | None = move_to_device(inp_kwargs, device=device)
             for bi in range(0, len(inps), batch_size):
                 try:
                     gpt_block(inps[bi : bi + batch_size].to(device=device), **inp_kwargs_gpu)
                 except ValueError as value_error:
-                    hidden_states.append(value_error.args[0].cpu())
-            del inp_kwargs_gpu
+                    hidden_states.append(value_error.args[0].to(device=cpu_device if save_gpu_mem else device))
+            if save_gpu_mem:
+                inp_kwargs_gpu: dict | None = None
 
             # parent layers no longer needed: output fake tensors
             for to_release_layer_name in to_release_layer_names:
@@ -148,7 +156,7 @@ def quantize_llama(
                     gptq_use_kernel=True,
                     gptq_block_sizes=group_sizes,
                     quant_symmetric=False,
-                    quant_mse=True,
+                    quant_mse=False,
                     quant_max_shrink=.8,
                     quant_n_grid=100,
                     quant_norm=2.4,
@@ -163,7 +171,7 @@ def quantize_llama(
                 reconstructed_nn_linear: nn.Linear = reconstruct_nn_linear(quant_meta, device=device)
                 quantizing_layer_wrapper.module = reconstructed_nn_linear
                 for hidden_state in hidden_states:
-                    quantizing_layer_wrapper.outs.append(reconstructed_nn_linear(hidden_state.to(device=device)).cpu())
+                    quantizing_layer_wrapper.outs.append(reconstructed_nn_linear(hidden_state.to(device=device)).to(device=cpu_device if save_gpu_mem else device))
                 reconstructed_nn_linear.cpu()
                 quantizing_layer_wrapper.stage = RecorderWrapper.stage_replay_mode
                 # log metrics
@@ -174,11 +182,13 @@ def quantize_llama(
             del hessian_hook, hidden_states
 
         # inputs of the next block
-        outs: torch.Tensor = torch.empty(*inps.shape, dtype=inps.dtype, device=cpu_device)
-        inp_kwargs_gpu: dict = move_to_device(inp_kwargs, device=device)
+        outs: torch.Tensor = torch.empty(*inps.shape, dtype=inps.dtype, device=cpu_device if save_gpu_mem else device)
+        if save_gpu_mem:
+            inp_kwargs_gpu: dict | None = move_to_device(inp_kwargs, device=device)
         for bi in range(0, len(inps), batch_size):
             outs[bi : bi + batch_size], = gpt_block(inps[bi : bi + batch_size].to(device=device), **inp_kwargs_gpu)
-        del inp_kwargs_gpu
+        if save_gpu_mem:
+            inp_kwargs_gpu: dict | None = None
         inps: torch.Tensor = outs
 
         # move norm layers to cpu
