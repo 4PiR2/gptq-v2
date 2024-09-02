@@ -12,14 +12,29 @@ inline int accumulate_hessian_cuda(
     const int size_hidden,
     const int size_batch
 ) {
-    // Define the GEMM type
+    using ElementAccumulator = OutputDtype;
+
     using Gemm = cutlass::gemm::device::Gemm<
         InputDtype,
         cutlass::layout::ColumnMajor,
         InputDtype,
         cutlass::layout::RowMajor,
         OutputDtype,
-        cutlass::layout::RowMajor
+        cutlass::layout::RowMajor,
+        ElementAccumulator,
+        cutlass::arch::OpClassTensorOp,
+        cutlass::arch::Sm80,
+        cutlass::gemm::GemmShape<64, 64, 32>,  // 128
+        cutlass::gemm::GemmShape<32, 32, 32>,  // 64
+        cutlass::gemm::GemmShape<16, 8, 16>,  // size of tensor core; do not change
+        cutlass::epilogue::thread::LinearCombination<
+            OutputDtype,
+            128 / cutlass::sizeof_bits<OutputDtype>::value,
+            ElementAccumulator,
+            ElementAccumulator
+        >,
+        cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+        3  // number of stages, usually 2-4
     >;
 
     // Create GEMM operation

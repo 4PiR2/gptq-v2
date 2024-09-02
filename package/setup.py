@@ -21,6 +21,13 @@ setuptools.setup(
             'gptq/gptq_cpp.cpp',
             'gptq/gptq_cpp_kernel.cu',
         ],
+    #     extra_compile_args={
+    #         'cxx': [],
+    #         'nvcc': [
+    #             '-gencode=arch=compute_80,code=sm_80',  # Add GPU architecture 8.0
+    #             '-gencode=arch=compute_86,code=sm_86',  # Add GPU architecture 8.6 if desired
+    #         ]
+    #     }
     )],
     include_dirs=[
         os.path.join(CUTLASS_PATH, 'include'),

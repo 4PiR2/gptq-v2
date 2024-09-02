@@ -7,8 +7,8 @@ device = 'cuda:1'
 type_x = torch.float16
 type_h = torch.float32
 
-x = torch.randn(77, 370, dtype=type_x, device=device)
-h = torch.randn(370, 370, dtype=type_h, device=device)
+x = torch.randn(256, 512, dtype=type_x, device=device)
+h = torch.randn(512, 512, dtype=type_h, device=device)
 x_32 = x.to(type_h)
 
 ref = h + x.t() @ x
