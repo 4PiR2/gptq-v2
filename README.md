@@ -1,5 +1,9 @@
 # GPTQ-V2
 
+## Clone this repo
+
+`git clone --recurse-submodules https://github.com/4PiR2/gptq-v2`
+
 ## Install kernel
 
 `cd package && ./install.sh`

@@ -1,5 +1,7 @@
 // https://developer.nvidia.com/blog/cutlass-linear-algebra-cuda/
 // https://github.com/NVIDIA/cutlass/blob/main/media/docs/fundamental_types.md
+// https://github.com/NVIDIA/cutlass/blob/main/media/docs/functionality.md
+// https://github.com/NVIDIA/cutlass/blob/main/test/unit/gemm/device/gemm_f16n_f16t_f16t_tensor_op_f32_sm80.cu
 
 
 #include "cutlass/gemm/device/gemm.h"
