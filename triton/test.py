@@ -32,7 +32,7 @@ def get_cuda_autotune_config():
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 2}, num_stages=3, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 2}, num_stages=3, num_warps=4),
         # Good config for fp8 inputs.
         # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
         # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
@@ -62,12 +62,12 @@ def matmul_kernel(
         # The stride variables represent how much to increase the ptr by when moving by 1
         # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
         # by to get the element one row down (A has M rows).
-        stride_am, stride_ak,  #
-        stride_bk, stride_bn,  #
+        stride_am, stride_ak,
+        stride_bk, stride_bn,
         stride_cm, stride_cn,
         # Meta-parameters
-        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,  #
-        GROUP_SIZE_M: tl.constexpr,  #
+        BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+        GROUP_SIZE_M: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -101,11 +101,9 @@ def matmul_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + (offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn)
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    c = tl.load(c_ptrs, mask=c_mask, other=0.0)
+
+    # TODO: (unknown reason) tl.load c here makes the kernel 2x slow
+    c = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -114,8 +112,8 @@ def matmul_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.)
         # We accumulate along the K dimension.
         c = tl.dot(a, b, c)
         # Advance the ptrs to the next K block.
@@ -124,6 +122,11 @@ def matmul_kernel(
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + (offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn)
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    c += tl.load(c_ptrs, mask=c_mask)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -132,11 +135,11 @@ def triton_matmul(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     matmul_kernel[grid](
-        mat_input, mat_input, mat_hessian,  #
-        N, N, K,  #
-        mat_input.stride(-1), mat_input.stride(-2),  #
-        mat_input.stride(-2), mat_input.stride(-1),  #
-        mat_hessian.stride(-2), mat_hessian.stride(-1),  #
+        mat_input, mat_input, mat_hessian,
+        N, N, K,
+        mat_input.stride(-1), mat_input.stride(-2),
+        mat_input.stride(-2), mat_input.stride(-1),
+        mat_hessian.stride(-2), mat_hessian.stride(-1),
     )
 
 
@@ -156,7 +159,7 @@ def bad_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
 torch.cuda.set_device(0)
 torch.manual_seed(0)
 
-# N, K = 8192 * 2, 2048 * 2
+# N, K = 16384, 4096
 N, K = 16384, 16384
 
 mat_input = torch.randn(K, N, device='cuda', dtype=torch.float16)
@@ -181,7 +184,13 @@ triton_output.tril_()
 diff_b = bad_output - torch_output
 diff_c = cutlass_output - torch_output
 diff_t = triton_output - torch_output
-print(diff_b.abs().mean().item(), diff_c.abs().mean().item(), diff_t.abs().mean().item(), sep='\t')
+print(
+    diff_b.abs().mean().item(),
+    diff_c.abs().mean().item(),
+    diff_t.abs().mean().item(),
+    (triton_output - cutlass_output).abs().mean().item(),
+    sep='\t',
+)
 
 
 # %%
