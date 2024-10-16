@@ -1,7 +1,7 @@
+from matplotlib import pyplot as plt
 import torch
-
 import triton
-import triton.language as tl
+from triton import language as tl
 
 import gptq
 
@@ -16,23 +16,39 @@ def get_cuda_autotune_config():
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 16}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 16}, num_stages=5, num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 2}, num_stages=3, num_warps=4),
         # Good config for fp8 inputs.
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4)
+        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+        # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+        # triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4)
     ]
 
 
 # `triton.jit`'ed functions can be auto-tuned by using the `triton.autotune` decorator, which consumes:
 #   - A list of `triton.Config` objects that define different configurations of
 #       meta-parameters (e.g., `BLOCK_SIZE_M`) and compilation options (e.g., `num_warps`) to try
-#   - An auto-tuning *key* whose change in values will trigger evaluation of all the
-#       provided configs
+#   - An auto-tuning *key* whose change in values will trigger evaluation of all the provided configs
 @triton.autotune(
     configs=get_cuda_autotune_config(),
     key=['M', 'N', 'K'],
@@ -69,6 +85,9 @@ def matmul_kernel(
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
+
+    if (pid_m + 1) * BLOCK_SIZE_M - 1 < pid_n * BLOCK_SIZE_N:
+        return
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
@@ -108,92 +127,102 @@ def matmul_kernel(
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-# %%
-# We can now create a convenience wrapper function that only takes two input tensors,
-# and (1) checks any shape constraint; (2) allocates the output; (3) launches the above kernel.
-
-
-def matmul(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
+def triton_matmul(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
     K, N = mat_input.shape
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     matmul_kernel[grid](
         mat_input, mat_input, mat_hessian,  #
         N, N, K,  #
-        mat_input.stride(1), mat_input.stride(0),  #
-        mat_input.stride(0), mat_input.stride(1),  #
-        mat_hessian.stride(0), mat_hessian.stride(1),  #
+        mat_input.stride(-1), mat_input.stride(-2),  #
+        mat_input.stride(-2), mat_input.stride(-1),  #
+        mat_hessian.stride(-2), mat_hessian.stride(-1),  #
     )
+
+
+def torch_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
+    mat_input = mat_input.to(dtype=torch.float32)
+    mat_hessian += mat_input.t() @ mat_input
+
+
+def bad_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
+    mat_hessian += mat_input.t() @ mat_input
 
 
 # %%
 # Unit Test
 # ---------
-#
-# We can test our custom matrix multiplication operation against a native torch implementation (i.e., cuBLAS).
 
+torch.cuda.set_device(0)
 torch.manual_seed(0)
 
-N, K = 2048, 2048
+# N, K = 8192 * 2, 2048 * 2
+N, K = 16384, 16384
 
 mat_input = torch.randn(K, N, device='cuda', dtype=torch.float16)
 
 torch_output = torch.randn(N, N, device='cuda', dtype=torch.float32)
+bad_output = torch_output.clone()
+cutlass_output = torch_output.clone()
 triton_output = torch_output.clone()
 
-gptq.accumulate_hessian(torch_output, mat_input)
+torch_baseline(torch_output, mat_input)
+bad_baseline(bad_output, mat_input)
+gptq.accumulate_hessian(cutlass_output, mat_input)
+triton_matmul(triton_output.clone(), mat_input)
+print(matmul_kernel.best_config)
+triton_matmul(triton_output, mat_input)
 
-matmul(triton_output.clone(), mat_input)
-matmul(triton_output, mat_input)
+torch_output.tril_()
+bad_output.tril_()
+cutlass_output.tril_()
+triton_output.tril_()
 
-diff = triton_output - torch_output
-print(f"triton_output_with_fp16_inputs={triton_output}")
-print(f"torch_output_with_fp16_inputs={torch_output}")
-
-if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
-else:
-    print("❌ Triton and Torch differ")
+diff_b = bad_output - torch_output
+diff_c = cutlass_output - torch_output
+diff_t = triton_output - torch_output
+print(diff_b.abs().mean().item(), diff_c.abs().mean().item(), diff_t.abs().mean().item(), sep='\t')
 
 
 # %%
 # Benchmark
 # ---------
-#
-# Square Matrix Performance
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~
-#
-# We can now compare the performance of our kernel against that of cuBLAS or rocBLAS. Here we focus on square matrices,
-# but feel free to arrange this script as you wish to benchmark any other matrix shape.
-
-ref_lib = 'cutlass'
 
 configs = [triton.testing.Benchmark(
-    x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
-    x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
-    line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
-    # Possible values for `line_arg`
-    # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
-    line_vals=[ref_lib.lower(), "triton"],  # Label name for the lines
-    line_names=[ref_lib, "Triton"],  # Line styles
-    styles=[("green", "-"), ("blue", "-")],
-    ylabel="TFLOPS",  # Label name for the y-axis
-    plot_name="matmul-performance-" + ("fp16"),  # Name for the plot, used also as a file name for saving the plot.
+    x_names=['N', 'K'],  # Argument names to use as an x-axis for the plot
+    x_vals=[2 ** i for i in range(8, 15)],  # Different possible values for `x_name`
+    line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
+    line_vals=['pytorch', 'bad', 'cutlass', 'triton'],  # Label name for the lines
+    line_names=['PyTorch', 'Bad', 'CUTLASS', 'Triton'],  # Line styles
+    plot_name='matmul-performance',  # Name for the plot, used also as a file name for saving the plot.
     args={},
+    xlabel='N',  # Label name for the y-axis
+    ylabel='TFLOPS',  # Label name for the y-axis
+    x_log=True,
+    y_log=True,
+    color=None,
+    styles=[('red', '-'), ('yellow', '-'), ('green', '-'), ('blue', '-')],
 )]
 
 
 @triton.testing.perf_report(configs)
-def benchmark(M, N, K, provider):
+def benchmark(N, K, provider):
     a = torch.randn(K, N, device='cuda', dtype=torch.float16)
     c = torch.randn(N, N, device='cuda', dtype=torch.float32)
     quantiles = [0.5, 0.2, 0.8]
-    if provider == ref_lib.lower():
+    if provider == 'pytorch':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch_baseline(c, a), quantiles=quantiles)
+    if provider == 'bad':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: bad_baseline(c, a), quantiles=quantiles)
+    if provider == 'cutlass':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gptq.accumulate_hessian(c, a), quantiles=quantiles)
     if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(c, a), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: triton_matmul(c, a), quantiles=quantiles)
+    perf = lambda ms: 2 * N * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-benchmark.run(show_plots=True, print_data=True)
+result_dfs = benchmark.run(show_plots=False, print_data=True, return_df=True)
+plt.grid()
+plt.show()
+xx = 0
