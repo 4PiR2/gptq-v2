@@ -85,9 +85,11 @@ def accumulate_hessian_triton_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    is_lower = (pid_m + 1) * BLOCK_SIZE_M - 1 >= pid_n * BLOCK_SIZE_N
-    if compute_lower_only and not is_lower:
+    is_upper = (pid_m + 1) * BLOCK_SIZE_M <= pid_n * BLOCK_SIZE_N
+    if compute_lower_only and is_upper:
         return
+    is_lower = pid_m * BLOCK_SIZE_M >= (pid_n + 1) * BLOCK_SIZE_N
+    is_diag = not (is_lower or is_upper)
 
     # Create pointers for the first blocks of A and B.
     # We will advance this pointer as we move in the K direction and accumulate
@@ -123,7 +125,8 @@ def accumulate_hessian_triton_kernel(
     c += tl.load(c_ptrs, mask=c_mask)
     tl.store(c_ptrs, c, mask=c_mask)
 
-    if compute_lower_only and not save_lower_only:
+    if compute_lower_only and not (save_lower_only or is_diag):
+        # Warning: BLOCK_SIZE_M:BLOCK_SIZE_N must be 1:n or n:1 for this kind of copying
         ct_ptrs = c_ptr + (offs_cn[:, None] * stride_cm + offs_cm[None, :] * stride_cn)
         tl.store(ct_ptrs, c.trans(1, 0), mask=c_mask.trans(1, 0))
 
