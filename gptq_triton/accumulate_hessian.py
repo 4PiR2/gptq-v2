@@ -3,7 +3,7 @@ import triton
 from triton import language as tl
 
 
-def _get_cuda_autotune_config():
+def _get_cuda_autotune_config() -> list[triton.Config]:
     return [
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 2}, num_warps=4, num_stages=3, num_ctas=1, maxnreg=None),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_warps=8, num_stages=3, num_ctas=1, maxnreg=None),
@@ -44,7 +44,7 @@ def _get_cuda_autotune_config():
 
 @triton.autotune(
     configs=_get_cuda_autotune_config(),
-    key=['size_hidden', 'size_batch', 'lower_only'],
+    key=['size_hidden', 'size_batch', 'save_lower_only', 'compute_lower_only'],
     restore_value=['mat_hessian_ptr'],
 )
 @triton.jit
@@ -53,12 +53,13 @@ def accumulate_hessian_triton_kernel(
         mat_input_ptr,
         size_hidden: int,
         size_batch: int,
-        lower_only,
+        save_lower_only,
+        compute_lower_only,
         BLOCK_SIZE_M: tl.constexpr,
         BLOCK_SIZE_N: tl.constexpr,
         BLOCK_SIZE_K: tl.constexpr,
         GROUP_SIZE_M: tl.constexpr,
-):
+) -> None:
     a_ptr, b_ptr, c_ptr = mat_input_ptr, mat_input_ptr, mat_hessian_ptr
     M, N, K = size_hidden, size_hidden, size_batch
     stride_am, stride_ak = 1, size_hidden
@@ -79,7 +80,8 @@ def accumulate_hessian_triton_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    if lower_only and (pid_m + 1) * BLOCK_SIZE_M - 1 < pid_n * BLOCK_SIZE_N:
+    is_lower = (pid_m + 1) * BLOCK_SIZE_M - 1 >= pid_n * BLOCK_SIZE_N
+    if compute_lower_only and not is_lower:
         return
 
     # Create pointers for the first blocks of A and B.
@@ -116,20 +118,35 @@ def accumulate_hessian_triton_kernel(
     c += tl.load(c_ptrs, mask=c_mask)
     tl.store(c_ptrs, c, mask=c_mask)
 
+    if compute_lower_only and not save_lower_only:
+        ct_ptrs = c_ptr + (offs_cn[:, None] * stride_cm + offs_cm[None, :] * stride_cn)
+        tl.store(ct_ptrs, c.trans(1, 0), mask=c_mask.trans(1, 0))
 
-def accumulate_hessian(mat_hessian: torch.Tensor, mat_input: torch.Tensor, lower_only: bool = True):
+
+def accumulate_hessian(
+        mat_hessian: torch.Tensor,
+        mat_input: torch.Tensor,
+        save_lower_only: bool,
+        compute_lower_only: bool = True,
+) -> None:
+    assert compute_lower_only or not save_lower_only, "compute_lower_only must be True when save_lower_only is True"
     torch.cuda.set_device(mat_input.device)
     size_batch, size_hidden = mat_input.shape
     grid = lambda meta: (triton.cdiv(size_hidden, meta['BLOCK_SIZE_M']) * triton.cdiv(size_hidden, meta['BLOCK_SIZE_N']),)
-    accumulate_hessian_triton_kernel[grid](mat_hessian, mat_input, size_hidden, size_batch, lower_only)
+    accumulate_hessian_triton_kernel[grid](
+        mat_hessian, mat_input,
+        size_hidden, size_batch,
+        save_lower_only,
+        compute_lower_only,
+    )
 
 
-def torch_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
+def torch_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor) -> None:
     mat_input = mat_input.to(dtype=torch.float32)
     mat_hessian += mat_input.t() @ mat_input
 
 
-def bad_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor):
+def bad_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor) -> None:
     mat_hessian += mat_input.t() @ mat_input
 
 
@@ -143,20 +160,28 @@ def unit_test():
     mat_input = torch.randn(size_batch, size_hidden, device='cuda', dtype=torch.float16)
 
     torch_output = torch.randn(size_hidden, size_hidden, device='cuda', dtype=torch.float32)
+    torch_output = torch_output + torch_output.t()
     bad_output = torch_output.clone()
     cutlass_output = torch_output.clone()
     triton_output = torch_output.clone()
+    triton_output_2 = torch_output.clone()
+    triton_output_3 = torch_output.clone()
 
     torch_baseline(torch_output, mat_input)
     bad_baseline(bad_output, mat_input)
     gptq.accumulate_hessian(cutlass_output, mat_input)
-    accumulate_hessian(triton_output, mat_input, lower_only=True)
+    accumulate_hessian(triton_output, mat_input, save_lower_only=True, compute_lower_only=True)
     print(accumulate_hessian_triton_kernel.best_config)
 
     torch_output.tril_()
     bad_output.tril_()
     cutlass_output.tril_()
     triton_output.tril_()
+
+    accumulate_hessian(triton_output_2, mat_input, save_lower_only=False, compute_lower_only=True)
+    assert (triton_output == triton_output_2.tril()).all() and (triton_output_2 == triton_output_2.t()).all()
+    accumulate_hessian(triton_output_3, mat_input, save_lower_only=False, compute_lower_only=False)
+    assert (triton_output == triton_output_3.tril()).all() and (triton_output_3 == triton_output_3.t()).all()
 
     diff_b = bad_output - torch_output
     diff_c = cutlass_output - torch_output
@@ -203,15 +228,16 @@ def benchmark():
         if provider == 'cutlass':
             ms, min_ms, max_ms = triton.testing.do_bench(lambda: gptq.accumulate_hessian(c, a), quantiles=quantiles)
         if provider == 'triton':
-            ms, min_ms, max_ms = triton.testing.do_bench(lambda: accumulate_hessian(c, a, lower_only=False), quantiles=quantiles)
+            ms, min_ms, max_ms = triton.testing.do_bench(lambda: accumulate_hessian(c, a, save_lower_only=False, compute_lower_only=False), quantiles=quantiles)
         if provider == 'triton_l':
-            ms, min_ms, max_ms = triton.testing.do_bench(lambda: accumulate_hessian(c, a, lower_only=True), quantiles=quantiles)
-        perf = lambda ms: 2 * N * N * K * 1e-12 / (ms * 1e-3)
+            ms, min_ms, max_ms = triton.testing.do_bench(lambda: accumulate_hessian(c, a, save_lower_only=False, compute_lower_only=True), quantiles=quantiles)
+        perf = lambda ms: 2. * N * N * K * 1e-12 / (ms * 1e-3)
         return perf(ms), perf(max_ms), perf(min_ms)
 
     result_dfs = _benchmark.run(show_plots=False, print_data=True, return_df=True)
     plt.grid()
     plt.show()
+    return result_dfs
 
 
 if __name__ == '__main__':
