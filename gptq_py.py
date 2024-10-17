@@ -1,8 +1,9 @@
 import torch
 
-from gptq import accumulate_hessian, gptq_quantize_range
+from gptq import accumulate_hessian as accumulate_hessian_c, gptq_quantize_range
 
 from quant import Quantizer, collate_quantizers
+from gptq_triton.accumulate_hessian import accumulate_hessian as accumulate_hessian_t
 
 
 class HessianHook:
@@ -31,7 +32,8 @@ class HessianHook:
             inp: torch.Tensor = inp.to(dtype=torch.float32)
             torch.addmm(self.hessian, inp.t(), inp, beta=1, alpha=1, out=self.hessian)  # self.hessian += inp.t() @ inp
         else:
-            accumulate_hessian(self.hessian, inp)
+            # accumulate_hessian_c(self.hessian, inp)
+            accumulate_hessian_t(self.hessian, inp, save_lower_only=False)
 
     @torch.no_grad()
     def invert(self, damp_ratio: float = 1e-2, act_order: bool = True) -> torch.Tensor:
