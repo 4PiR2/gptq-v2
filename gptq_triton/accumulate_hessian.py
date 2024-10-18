@@ -127,8 +127,8 @@ def accumulate_hessian_triton_kernel(
 
     if compute_lower_only and not (save_lower_only or is_diag):
         # Warning: BLOCK_SIZE_M:BLOCK_SIZE_N must be 1:n or n:1 for this kind of copying
-        ct_ptrs = c_ptr + (offs_cn[:, None] * stride_cm + offs_cm[None, :] * stride_cn)
-        tl.store(ct_ptrs, c.trans(1, 0), mask=c_mask.trans(1, 0))
+        ct_ptrs = c_ptr + (offs_cm[:, None] * stride_cn + offs_cn[None, :] * stride_cm)
+        tl.store(ct_ptrs, c, mask=c_mask)
 
 
 def accumulate_hessian(
@@ -158,14 +158,14 @@ def bad_baseline(mat_hessian: torch.Tensor, mat_input: torch.Tensor) -> None:
     mat_hessian += mat_input.t() @ mat_input
 
 
-def unit_test():
+def unit_test(dtype: torch.dtype):
     import gptq
 
     torch.manual_seed(0)
 
     size_batch, size_hidden = 16384, 4096
 
-    mat_input = torch.randn(size_batch, size_hidden, device='cuda', dtype=torch.float16)
+    mat_input = torch.randn(size_batch, size_hidden, device='cuda', dtype=dtype)
 
     torch_output = torch.randn(size_hidden, size_hidden, device='cuda', dtype=torch.float32)
     torch_output = torch_output + torch_output.t()
@@ -203,7 +203,7 @@ def unit_test():
     )
 
 
-def benchmark():
+def benchmark(dtype: torch.dtype):
     from matplotlib import pyplot as plt
     import gptq
 
@@ -212,7 +212,7 @@ def benchmark():
         x_vals=[2 ** i for i in range(8, 15)],  # Different possible values for `x_name`
         line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
         line_vals=['pytorch', 'bad', 'cutlass', 'triton', 'triton_l'],  # Label name for the lines
-        line_names=['PyTorch (16x16=>32)', 'PyTorch (16x16=>16)', 'CUTLASS', 'Triton', 'Triton (Lower)'],  # Line styles
+        line_names=['PyTorch (FP32)', 'PyTorch (FP16)', 'CUTLASS', 'Triton', 'Triton (Lower)'],  # Line styles
         plot_name='matmul-performance',  # Name for the plot, used also as a file name for saving the plot.
         args={},
         xlabel='N',  # Label name for the y-axis
@@ -226,7 +226,7 @@ def benchmark():
 
     @triton.testing.perf_report(configs)
     def _benchmark(N, K, provider):
-        a = torch.randn(K, N, device='cuda', dtype=torch.float16)
+        a = torch.randn(K, N, device='cuda', dtype=dtype)
         c = torch.randn(N, N, device='cuda', dtype=torch.float32)
         quantiles = [.5, .2, .8]
         if provider == 'pytorch':
@@ -249,5 +249,7 @@ def benchmark():
 
 
 if __name__ == '__main__':
-    unit_test()
-    benchmark()
+    unit_test(dtype=torch.float16)
+    unit_test(dtype=torch.bfloat16)
+    benchmark(dtype=torch.float16)
+    benchmark(dtype=torch.bfloat16)
