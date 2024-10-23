@@ -221,7 +221,7 @@ def collate_quantizers(*args):
 
 def construct_matrix(
         qweight: torch.Tensor,  # (R, C), int16
-        scale: torch.Tensor,  # (R, G), float16
+        scale: torch.Tensor,  # (R, G), float16 or bfloat16
         qzero: torch.Tensor,  # (R, G) or (G) or (), int16
         group_sizes: torch.Tensor,  # (G), int16
 ) -> torch.Tensor:
@@ -230,7 +230,7 @@ def construct_matrix(
     """
     qzero = qzero.expand(scale.shape)
     group_ids: list[int] = [0] + group_sizes.cumsum(dim=-1).tolist()
-    weight = torch.empty_like(qweight, dtype=torch.float16, device=qweight.device)
+    weight = torch.empty_like(qweight, dtype=scale.dtype, device=qweight.device)
     for k in range(len(group_ids) - 1):
         i1, i2 = group_ids[k], group_ids[k + 1]
         weight[:, i1:i2] = Quantizer(scale=scale[:, k:k+1], qzero=qzero[:, k:k+1]).dequantize(qweight[:, i1:i2])
@@ -241,7 +241,7 @@ def construct_matrix_2(
         qweight: torch.Tensor,  # (R, C), int16
         qzero: torch.Tensor,  # (R, G) or (G) or (), int16
         qscale: torch.Tensor,  # (R, G), int16
-        sscale: torch.Tensor,  # (G), float16
+        sscale: torch.Tensor,  # (G), float16 or bfloat16
         group_sizes: torch.Tensor,  # (G), int16
 ) -> torch.Tensor:
     """
@@ -250,7 +250,7 @@ def construct_matrix_2(
     qzero = qzero.expand(qscale.shape)
     sscale = sscale.expand(1, sscale.size(-1))
     group_ids: list[int] = [0] + group_sizes.cumsum(dim=-1).tolist()
-    weight = torch.empty_like(qweight, dtype=torch.float16, device=qweight.device)
+    weight = torch.empty_like(qweight, dtype=sscale.dtype, device=qweight.device)
     for k in range(len(group_ids) - 1):
         i1, i2 = group_ids[k], group_ids[k + 1]
         weight[:, i1:i2] = Quantizer(
@@ -259,21 +259,21 @@ def construct_matrix_2(
     return weight
 
 
-def reconstruct_nn_linear(quant_meta: dict, device: torch.device = torch.device('cpu')) -> nn.Linear:
+def reconstruct_nn_linear(quant_meta: dict, dtype: torch.dtype, device: torch.device = torch.device('cpu')) -> nn.Linear:
     qweight = quant_meta['qweight'].to(dtype=torch.int16, device=device)
     qzero = quant_meta['qzero'].to(dtype=torch.int16, device=device)
     group_sizes = quant_meta['group_sizes'].to(dtype=torch.int16, device=device)
     if 'sscale' in quant_meta and quant_meta['sscale'] is not None:
         qscale = quant_meta['qscale'].to(dtype=torch.int16, device=device)
-        sscale = quant_meta['sscale'].to(dtype=torch.float16, device=device)
+        sscale = quant_meta['sscale'].to(dtype=dtype, device=device)
         weight = construct_matrix_2(qweight, qzero, qscale, sscale, group_sizes)
     else:
-        scale = quant_meta['scale'].to(dtype=torch.float16, device=device)
+        scale = quant_meta['scale'].to(dtype=dtype, device=device)
         weight = construct_matrix(qweight, scale, qzero, group_sizes)
     if 'perm_inv' in quant_meta and quant_meta['perm_inv'] is not None:
         perm_inv = quant_meta['perm_inv'].to(dtype=torch.int32, device=device)
         weight = weight[:, perm_inv]
-    nn_linear = nn.Linear(*weight.shape[::-1], bias=False, dtype=torch.float16, device=weight.device)
+    nn_linear = nn.Linear(*weight.shape[::-1], bias=False, dtype=dtype, device=weight.device)
     nn_linear.weight.data = weight
     nn_linear.eval()
     return nn_linear

@@ -27,7 +27,7 @@ def get_initial_inputs(
     """
     catch first layer's input
     encodings: (B, N=SeqLen), int64
-    inps: inputs, (B, N=SeqLen, D), float16
+    inps: inputs, (B, N=SeqLen, D), float16 or bfloat16
     attention_mask = None
     position_ids: (1, N=SeqLen), int64
     past_key_value: None
@@ -75,6 +75,7 @@ def quantize_llama(
     cpu_device: torch.device = torch.device('cpu')
     inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size)
     use_cache, model.config.use_cache = model.config.use_cache, False
+    dtype: torch.dtype = inps.dtype
     if not save_gpu_mem:
         inps = inps.to(device=device)
         inp_kwargs_gpu: dict | None = move_to_device(inp_kwargs, device=device)
@@ -92,7 +93,7 @@ def quantize_llama(
         block_start_time: float = time.time()
 
         # find dependency info
-        dependency_info: list[tuple] = extract_dependencies(gpt_block, [nn.Linear], inps.shape, inps.dtype, cpu_device, inp_kwargs)
+        dependency_info: list[tuple] = extract_dependencies(gpt_block, [nn.Linear], inps.shape, dtype, cpu_device, inp_kwargs)
 
         # wrap layers
         wrapper_layers_dict: dict[str, RecorderWrapper] = {}
@@ -168,7 +169,7 @@ def quantize_llama(
                 results['data'][canonical_name] = quant_meta
                 quantizing_layer_wrapper.hessian_hook = None
                 # reconstruct layer and record outputs
-                reconstructed_nn_linear: nn.Linear = reconstruct_nn_linear(quant_meta, device=device)
+                reconstructed_nn_linear: nn.Linear = reconstruct_nn_linear(quant_meta, dtype=dtype, device=device)
                 quantizing_layer_wrapper.module = reconstructed_nn_linear
                 for hidden_state in hidden_states:
                     quantizing_layer_wrapper.outs.append(reconstructed_nn_linear(hidden_state.to(device=device)).to(device=cpu_device if save_gpu_mem else device))
@@ -182,7 +183,7 @@ def quantize_llama(
             del hessian_hook, hidden_states
 
         # inputs of the next block
-        outs: torch.Tensor = torch.empty(*inps.shape, dtype=inps.dtype, device=cpu_device if save_gpu_mem else device)
+        outs: torch.Tensor = torch.empty(*inps.shape, dtype=dtype, device=cpu_device if save_gpu_mem else device)
         if save_gpu_mem:
             inp_kwargs_gpu: dict | None = move_to_device(inp_kwargs, device=device)
         for bi in range(0, len(inps), batch_size):

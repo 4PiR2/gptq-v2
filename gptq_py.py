@@ -82,10 +82,11 @@ def gptq_quant(
         quant_norm: float = 2.4,
         quant_use_kernel: bool = False,
 ) -> dict[str, dict]:
+    n_rows, n_columns = weight.shape
+    dtype: torch.dtype = weight.dtype
+    device: torch.device = weight.device
     weight_ref: torch.Tensor = weight
     weight: torch.Tensor = weight.to(dtype=torch.float32).clone()
-    n_rows, n_columns = weight.shape
-    device: torch.device = weight.device
 
     if hessian_hook is not None:
         dead: torch.Tensor = hessian_hook.hessian.diag() == 0.
@@ -200,10 +201,10 @@ def gptq_quant(
 
     quant: torch.Tensor = quant[:, indicies_c]
     qweight: torch.Tensor = qweight.to(dtype=torch.uint8)[:, indicies_c].cpu()  # (R, C)
-    scale: torch.Tensor = quant_meta_g['scale'].to(dtype=torch.float16)[:, indicies_g].cpu()  # (R, G)
+    scale: torch.Tensor = quant_meta_g['scale'].to(dtype=dtype)[:, indicies_g].cpu()  # (R, G)
     qzero: torch.Tensor = quant_meta_g['qzero'].to(dtype=torch.uint8)[:, indicies_g].cpu()  # (R, G)
     qscale: torch.Tensor = quant_meta_g['qscale'].to(dtype=torch.uint8)[:, indicies_g].cpu() if 'qscale' in quant_meta_g else None  # (R, G)
-    sscale: torch.Tensor = quant_meta_g['sscale'].to(dtype=torch.float16)[0, indicies_g].cpu() if 'sscale' in quant_meta_g else None  # (G)
+    sscale: torch.Tensor = quant_meta_g['sscale'].to(dtype=dtype)[0, indicies_g].cpu() if 'sscale' in quant_meta_g else None  # (G)
     if hessian_hook is not None and hessian_hook.perm is not None:
         perm: torch.Tensor = hessian_hook.perm.to(dtype=torch.int16)[indicies_c].cpu()  # (C)
     else:
