@@ -81,6 +81,7 @@ def gptq_quant(
         quant_n_grid: int = 100,
         quant_norm: float = 2.4,
         quant_use_kernel: bool = False,
+        save_device: torch.device = torch.device('cpu'),
 ) -> dict[str, dict]:
     n_rows, n_columns = weight.shape
     dtype: torch.dtype = weight.dtype
@@ -89,10 +90,10 @@ def gptq_quant(
     weight: torch.Tensor = weight.to(dtype=torch.float32).clone()
 
     if hessian_hook is not None:
-        dead: torch.Tensor = hessian_hook.hessian.diag() == 0.
-        weight[:, dead] = 0.
         if hessian_hook.perm is not None:
             weight = weight[:, hessian_hook.perm]
+        dead: torch.Tensor = hessian_hook.hessian.diag() == 0.
+        weight[:, dead] = 0.
 
     group_ids: list[int] = [0] + group_sizes.cumsum(dim=-1).tolist()
     quantizers: list[Quantizer] = []
@@ -103,15 +104,24 @@ def gptq_quant(
         qweight: torch.Tensor = torch.empty_like(weight, dtype=torch.int16)
         for bit_width, i1, i2 in zip(group_bit_widths, group_ids[:-1], group_ids[1:]):
             quantizer: Quantizer = Quantizer()
-            quantizer.find_params(weight[:, i1:i2], bit_width=bit_width, sym=quant_symmetric,
-                                  scale_bit_width=scale_bit_width)
+            quantizer.find_params(
+                weight[:, i1:i2],
+                bit_width=bit_width,
+                sym=quant_symmetric,
+                scale_bit_width=scale_bit_width,
+            )
             if quant_mse:
-                quantizer.mse(weight[:, i1:i2], max_shrink=quant_max_shrink, n_grid=quant_n_grid, norm=quant_norm,
-                              use_kernel=quant_use_kernel)
+                quantizer.mse(
+                    weight[:, i1:i2],
+                    max_shrink=quant_max_shrink,
+                    n_grid=quant_n_grid,
+                    norm=quant_norm,
+                    use_kernel=quant_use_kernel,
+                )
             quantizers.append(quantizer)
             qweight[:, i1:i2] = qw = quantizer.quantize(weight[:, i1:i2])
             quant[:, i1:i2] = quantizer.dequantize(qw)
-        error: torch.Tensor = torch.tensor(0., device=device)
+        error: torch.Tensor = torch.tensor(0., dtype=quant.dtype, device=device)
     elif gptq_use_kernel:
         # assume gptq_block_sizes is the same as quantization group_sizes
         torch.cuda.set_device(device)  # exllama kernel requirement
@@ -165,15 +175,19 @@ def gptq_quant(
                         scale_bit_width=scale_bit_width,
                     )
                     if quant_mse:
-                        quantizer.mse(weight[:, i1:i2], max_shrink=quant_max_shrink, n_grid=quant_n_grid,
-                                      norm=quant_norm, use_kernel=quant_use_kernel)
+                        quantizer.mse(
+                            weight[:, i1:i2],
+                            max_shrink=quant_max_shrink,
+                            n_grid=quant_n_grid,
+                            norm=quant_norm,
+                            use_kernel=quant_use_kernel,
+                        )
                     quantizers.append(quantizer)
                     cur_group += 1
                 w: torch.Tensor = weight_block[:, j - i1: j - i1 + 1]
                 qweight[:, j: j + 1] = qw = quantizer.quantize(w)
                 quant[:, j: j + 1] = q = quantizer.dequantize(qw)
-                error[:, j: j + 1] = error_block[:, j - i1: j - i1 + 1] \
-                    = err = (w - q) / hessian_hook.hessian_inv[j, j]
+                error[:, j: j + 1] = error_block[:, j - i1: j - i1 + 1] = err = (w - q) / hessian_hook.hessian_inv[j, j]
                 # here is different from paper: no need to update weight_block[:, j - i1]
                 weight_block[:, j - i1 + 1:] -= err @ hessian_hook.hessian_inv[j: j + 1, j + 1: i2]
             weight[:, i2:] -= error_block @ hessian_hook.hessian_inv[i1:i2, i2:]
@@ -200,19 +214,19 @@ def gptq_quant(
     quant_meta_g: dict[str, torch.Tensor] = collate_quantizers(*quantizers)
 
     quant: torch.Tensor = quant[:, indicies_c]
-    qweight: torch.Tensor = qweight.to(dtype=torch.uint8)[:, indicies_c].cpu()  # (R, C)
-    scale: torch.Tensor = quant_meta_g['scale'].to(dtype=dtype)[:, indicies_g].cpu()  # (R, G)
-    qzero: torch.Tensor = quant_meta_g['qzero'].to(dtype=torch.uint8)[:, indicies_g].cpu()  # (R, G)
-    qscale: torch.Tensor = quant_meta_g['qscale'].to(dtype=torch.uint8)[:, indicies_g].cpu() if 'qscale' in quant_meta_g else None  # (R, G)
-    sscale: torch.Tensor = quant_meta_g['sscale'].to(dtype=dtype)[0, indicies_g].cpu() if 'sscale' in quant_meta_g else None  # (G)
+    qweight: torch.Tensor = qweight.to(dtype=torch.uint8)[:, indicies_c].to(device=save_device)  # (R, C)
+    scale: torch.Tensor = quant_meta_g['scale'].to(dtype=dtype)[:, indicies_g].to(device=save_device)  # (R, G)
+    qzero: torch.Tensor = quant_meta_g['qzero'].to(dtype=torch.uint8)[:, indicies_g].to(device=save_device)  # (R, G)
+    qscale: torch.Tensor = quant_meta_g['qscale'].to(dtype=torch.uint8)[:, indicies_g].to(device=save_device) if 'qscale' in quant_meta_g else None  # (R, G)
+    sscale: torch.Tensor = quant_meta_g['sscale'].to(dtype=dtype)[0, indicies_g].to(device=save_device) if 'sscale' in quant_meta_g else None  # (G)
     if hessian_hook is not None and hessian_hook.perm is not None:
-        perm: torch.Tensor = hessian_hook.perm.to(dtype=torch.int16)[indicies_c].cpu()  # (C)
+        perm: torch.Tensor = hessian_hook.perm.to(dtype=torch.int16)[indicies_c].to(device=save_device)  # (C)
     else:
-        perm: torch.Tensor = torch.arange(n_columns, dtype=torch.int16, device=device)[indicies_c].cpu()
-    perm_inv: torch.Tensor = perm.argsort().to(dtype=torch.int16).cpu()  # (C)
-    group_sizes: torch.Tensor = group_sizes.to(dtype=torch.int16)[indicies_g].cpu()  # (G)
-    group_bit_widths: torch.Tensor = group_bit_widths.to(dtype=torch.uint8)[indicies_g].cpu()  # (G)
-    scale_bit_width: torch.Tensor = scale_bit_width.to(dtype=torch.uint8).cpu() if scale_bit_width is not None else None  # ()
+        perm: torch.Tensor = torch.arange(n_columns, dtype=torch.int16, device=device)[indicies_c].to(device=save_device)
+    perm_inv: torch.Tensor = perm.argsort().to(dtype=torch.int16, device=save_device)  # (C)
+    group_sizes: torch.Tensor = group_sizes.to(dtype=torch.int16)[indicies_g].to(device=save_device)  # (G)
+    group_bit_widths: torch.Tensor = group_bit_widths.to(dtype=torch.uint8)[indicies_g].to(device=save_device)  # (G)
+    scale_bit_width: torch.Tensor = scale_bit_width.to(dtype=torch.uint8, device=save_device) if scale_bit_width is not None else None  # ()
 
     if perm_inv is not None:
         quant: torch.Tensor = quant[:, perm_inv.to(dtype=torch.int32)]

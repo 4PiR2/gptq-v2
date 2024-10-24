@@ -241,7 +241,7 @@ def construct_matrix_2(
         qweight: torch.Tensor,  # (R, C), int16
         qzero: torch.Tensor,  # (R, G) or (G) or (), int16
         qscale: torch.Tensor,  # (R, G), int16
-        sscale: torch.Tensor,  # (G), float16 or bfloat16
+        sscale: torch.Tensor,  # (1, G) or (G), float16 or bfloat16
         group_sizes: torch.Tensor,  # (G), int16
 ) -> torch.Tensor:
     """
@@ -254,7 +254,7 @@ def construct_matrix_2(
     for k in range(len(group_ids) - 1):
         i1, i2 = group_ids[k], group_ids[k + 1]
         weight[:, i1:i2] = Quantizer(
-            qzero=qzero[:, k:k+1], qscale=qscale[:, k:k+1], sscale=sscale[:, k:k + 1],
+            qzero=qzero[:, k:k+1], qscale=qscale[:, k:k+1], sscale=sscale[:, k:k+1],
         ).dequantize(qweight[:, i1:i2])
     return weight
 

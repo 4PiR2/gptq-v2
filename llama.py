@@ -23,6 +23,7 @@ def get_initial_inputs(
         encodings: torch.Tensor,
         device: torch.device,
         batch_size: int = 1,
+        save_device: torch.device = torch.device('cpu'),
 ) -> tuple[torch.Tensor, dict]:
     """
     catch first layer's input
@@ -50,14 +51,14 @@ def get_initial_inputs(
         try:
             model(encodings[bi : bi + batch_size].to(device=device))
         except ValueError as value_error:
-            inps.append(value_error.args[0][0])
+            inps.append(value_error.args[0][0].to(device=save_device))
             inp_kwargs: dict = value_error.args[1]
 
     gpt_blocks[0] = gpt_block_0
     model.model.embed_tokens.cpu()
     model.model.rotary_emb.cpu()
     model.config.use_cache = use_cache
-    return torch.cat(inps, dim=0).cpu(), move_to_device(inp_kwargs, torch.device('cpu'))
+    return torch.cat(inps, dim=0), move_to_device(inp_kwargs, save_device)
 
 
 @torch.no_grad()
@@ -213,8 +214,7 @@ def evaluate_llama(
         device: torch.device,
         batch_size: int = 1,
 ) -> torch.Tensor:
-    inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size)
-    inp_kwargs: dict = move_to_device(inp_kwargs, device=device)
+    inps, inp_kwargs = get_initial_inputs(model, encodings, device, batch_size, save_device=device)
     use_cache, model.config.use_cache = model.config.use_cache, False
 
     layers: nn.ModuleList = model.model.layers
